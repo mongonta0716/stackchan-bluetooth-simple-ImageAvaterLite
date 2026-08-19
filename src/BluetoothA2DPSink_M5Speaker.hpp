@@ -44,6 +44,7 @@ public:
     }
 
     BluetoothA2DPSink::end(false);
+    _stack_ready = false;
     set_last_connection(saved_peer);
   }
 
@@ -61,6 +62,38 @@ public:
   void rememberLastConnection(esp_bd_addr_t peer)
   {
     set_last_connection(peer);
+  }
+
+  // ペアリング中だけ外部からの検出・接続を許可します。通常時は保存済み
+  // 接続先へESP32側から接続するため、page scanを停止します。
+  void setPairingMode(bool enabled)
+  {
+    _pairing_mode = enabled;
+#ifdef ESP_IDF_4
+    set_discoverability(enabled ? ESP_BT_GENERAL_DISCOVERABLE
+                                : ESP_BT_NON_DISCOVERABLE);
+#endif
+    if (_stack_ready) {
+      set_scan_mode_connectable(enabled);
+    }
+  }
+
+  bool isPairingMode(void) const { return _pairing_mode; }
+  bool isStackReady(void) const { return _stack_ready; }
+
+  // connect_to()は接続前に100msだけpage scanを有効にするため使用しません。
+  // 非接続受付のまま、保存済みPCへ発信接続します。
+  bool connectToLockedPeer(const esp_bd_addr_t peer)
+  {
+    if (_pairing_mode || !_stack_ready
+        || get_connection_state() != ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+      return false;
+    }
+
+    memcpy(peer_bd_addr, peer, ESP_BD_ADDR_LEN);
+    const esp_err_t result = esp_a2d_connect(peer_bd_addr);
+    set_scan_mode_connectable(false);
+    return result == ESP_OK;
   }
 
   void clear(void)
@@ -87,6 +120,17 @@ protected:
   const char* _avatar_text = "";
   hvtEventCallback _hvt_evt_cb = nullptr;
   uint8_t _virtual_channel = 0;
+  volatile bool _pairing_mode = true;
+  volatile bool _stack_ready = false;
+
+  void av_hdl_stack_evt(uint16_t event, void *p_param) override
+  {
+    BluetoothA2DPSink::av_hdl_stack_evt(event, p_param);
+    if (event == BT_APP_EVT_STACK_UP) {
+      _stack_ready = true;
+      setPairingMode(_pairing_mode);
+    }
+  }
 
   void clearMetaData(void)
   {
@@ -163,15 +207,14 @@ protected:
 
     BluetoothA2DPSink::av_hdl_a2d_evt(event, p_param);
 
-#ifdef ESP_IDF_4
-    // Pairing mode is only needed until the first connection succeeds.
-    // Keeping the sink non-discoverable afterwards prevents Windows Swift
-    // Pair notifications while retaining connectability for the saved peer.
+    // 最初の接続後は通常モードへ移り、保存済みPC以外からの接続受付を止めます。
     if (event == ESP_A2D_CONNECTION_STATE_EVT
         && a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-      set_discoverability(ESP_BT_NON_DISCOVERABLE);
+      _pairing_mode = false;
     }
-#endif
+    if (_stack_ready) {
+      setPairingMode(_pairing_mode);
+    }
   }
 
   void av_hdl_avrc_evt(uint16_t event, void *p_param) override

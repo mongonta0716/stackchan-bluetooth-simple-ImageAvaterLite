@@ -87,11 +87,11 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 - balloon<br>吹き出しの設定をします。
     - font_language("CN")<br>フォントの言語を指定します。"JA"か"CN"、指定しないとラテンフォントを使用します。
     - lyrics<br>ノーマルモード時にランダムで表示するセリフを設定します。最大10個まで。
-- led_lr(0)<br>GoBottom1/2で音量に対応してLEDが光るようになります。※ソースの書き換えとコンパイルが必要。
+- led_lr(0)<br>Port.BのO端子（GPIO26）へ接続したNekomimi LEDが左右の音量に対応して光ります。電源はPort.Bの5V/GNDを使用し、SK6812を左右9灯ずつ、計18灯制御します。
     - 0: ステレオ
     - 1: 左の音量のみに反応
     - 2: 右の音量のみに反応
-- led_pin(15)<br>LEDのGPIOピン番号を指定（GoBottom1: 15, GoBottom2: 25）
+- led_pin(15)<br>M5Go Bottom用の設定です。Nekomimi LED使用時はGPIO26固定のため使用しません。
 - takao_base(false)<br>[Stack-chan_Takao_Base](https://ssci.to/8905)を使用するかどうかの設定。(※現在対応しているのはCore2のみ)
 - servo_type("DYN_XL330")<br>サーボの種類を指定
     - "PWM": SG90系のPWMサーボ
@@ -105,7 +105,9 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 # 使い方
 
 - BtnA<br>Bluetoothモードに入ります。(bluetooth_mode = falseの時のみ有効)<br>
-- BtnA 3クリック<br>保存済みの接続先を解除し、Bluetoothペアリングモードに入ります。初回接続時や接続先PCを変更するときに使用します。通常のBluetoothモードでは保存済みPCのみ接続でき、周囲のPCからは検出されません。<br>
+- BtnA 3秒長押し<br>保存済みの接続先を解除し、Bluetoothペアリングモードに入ります。初回接続時や接続先PCを変更するときに使用します。通常のBluetoothモードでは保存済みPCのみ接続でき、周囲のPCからは検出されません。<br>
+
+一度接続したPCは本体に保存され、次回起動時は`starting_state`の設定にかかわらずBluetoothを起動して自動再接続します。
 
 - BtnB<br>音量を下げます。
 
@@ -122,4 +124,3 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 
 # Author
 [Takao Akaki](https://github.com/mongonta0716)
-

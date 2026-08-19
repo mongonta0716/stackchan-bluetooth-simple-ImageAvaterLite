@@ -28,7 +28,7 @@ StackchanSERVO servo;
 
 #include "Stackchan_system_config.h"
 
-// M5GoBottomのLEDを使わない場合は下記の1行をコメントアウトしてください。
+// LEDレベルメーターを使わない場合は下記の1行をコメントアウトしてください。
 // USE_TCPNOTIFY(WiFi+TCP通知)を有効にした場合、M5Stack Core2ではIRAM不足でビルドできないため
 // USE_LEDは自動的に無効化されます。(platformio.iniのbuild_flagsでUSE_TCPNOTIFYを指定してください。)
 // USE_UARTNOTIFY(UART通知)はWiFi/Bluetoothの共存コードを使わないためIRAMをほとんど消費せず、
@@ -36,10 +36,24 @@ StackchanSERVO servo;
 #if !defined(USE_TCPNOTIFY)
 #define USE_LED
 #endif
+// Port.B(GPIO26)に接続したNekomimi LED（左右9灯、計18灯）を使用します。
+// M5Go Bottomの内蔵LEDを使う場合はコメントアウトしてください。
+#define USE_NECOMIMI_LED
 //#define USE_LED_OUT
 
 #ifdef USE_LED
   #include <FastLED.h>
+#ifdef USE_NECOMIMI_LED
+  #define NUM_LEDS 18
+  #define LED_PIN 26
+  static constexpr uint8_t LEDS_PER_EAR = NUM_LEDS / 2;
+  CRGB leds[NUM_LEDS];
+  const CRGB led_table[LEDS_PER_EAR] = {
+    CRGB::Purple, CRGB::MediumPurple, CRGB::Blue,
+    CRGB::Green, CRGB::LimeGreen, CRGB::Yellow,
+    CRGB::DarkOrange, CRGB::OrangeRed, CRGB::Red
+  };
+#else
   #define NUM_LEDS 10
   #define NUM_LED_OUT 55
 #if defined(ARDUINO_M5STACK_FIRE) || defined(ARDUINO_M5Stack_Core_ESP32)
@@ -61,6 +75,7 @@ StackchanSERVO servo;
   CHSV yellow (45, 255, 255);
   CHSV hsv_table[5] = { blue, green, yellow, magenta, red };
   CHSV hsv_table_out[5] = { blue, green, yellow, magenta, red }; //red, magenta, yellow, green, blue };
+#endif
 
   void turn_off_led() {
     // Now turn the LED off, then pause
@@ -74,6 +89,21 @@ StackchanSERVO servo;
   }
 
   void level_led(int level1, int level2) {  
+#ifdef USE_NECOMIMI_LED
+    level1 = constrain(level1, 0, LEDS_PER_EAR);
+    level2 = constrain(level2, 0, LEDS_PER_EAR);
+
+    clear_led_buff();
+    // 各耳は両端から中央へ向かって対称に点灯します。
+    for (uint8_t i = 0; i < level1; ++i) {
+      leds[i] = led_table[i];
+      leds[LEDS_PER_EAR - 1 - i] = led_table[i];
+    }
+    for (uint8_t i = 0; i < level2; ++i) {
+      leds[LEDS_PER_EAR + i] = led_table[i];
+      leds[NUM_LEDS - 1 - i] = led_table[i];
+    }
+#else
   if(level1 > 5) level1 = 5;
   if(level2 > 5) level2 = 5;
     
@@ -90,6 +120,7 @@ StackchanSERVO servo;
       fill_gradient(leds_out, 19, hsv_table_out[i], 36, hsv_table_out[0] );
       #endif
     }
+#endif
     FastLED.show();
   }
 #endif
@@ -110,11 +141,64 @@ String current_avatar_filename;
 String avatar_config_error;
 portMUX_TYPE avatar_event_mux = portMUX_INITIALIZER_UNLOCKED;
 int8_t pending_avatar_expression = -1;
+bool bluetooth_pairing_screen_active = false;
+bool pending_bluetooth_pairing_screen_close = false;
 
 // 付属のslimeアバターでは normal / sad / angry の順に表情を定義しています。
 static constexpr uint8_t IMAGE_EXPRESSION_NORMAL = 0;
 static constexpr uint8_t IMAGE_EXPRESSION_SAD = 1;
 static constexpr uint8_t IMAGE_EXPRESSION_ANGRY = 2;
+
+bool isBluetoothPairingScreenActive() {
+  bool active;
+  portENTER_CRITICAL(&avatar_event_mux);
+  active = bluetooth_pairing_screen_active;
+  portEXIT_CRITICAL(&avatar_event_mux);
+  return active;
+}
+
+// ImageAvatarLiteの描画タスクを止め、ペアリング中だけ案内画面を表示します。
+void showBluetoothPairingScreen() {
+  portENTER_CRITICAL(&avatar_event_mux);
+  bluetooth_pairing_screen_active = true;
+  pending_bluetooth_pairing_screen_close = false;
+  pending_avatar_expression = -1;
+  portEXIT_CRITICAL(&avatar_event_mux);
+
+  avatar.suspend();
+  gfx.startWrite();
+  gfx.fillScreen(TFT_BLACK);
+  gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+  gfx.setTextSize(2);
+  gfx.setTextDatum(textdatum_t::middle_center);
+  gfx.drawString("Bluetooth pairing mode", gfx.width() / 2, gfx.height() / 2);
+  gfx.endWrite();
+}
+
+void closeBluetoothPairingScreen() {
+  bool was_active;
+  portENTER_CRITICAL(&avatar_event_mux);
+  was_active = bluetooth_pairing_screen_active;
+  bluetooth_pairing_screen_active = false;
+  pending_bluetooth_pairing_screen_close = false;
+  portEXIT_CRITICAL(&avatar_event_mux);
+
+  if (was_active) {
+    avatar.resume();
+  }
+}
+
+void processBluetoothPairingScreen() {
+  bool should_close;
+  portENTER_CRITICAL(&avatar_event_mux);
+  should_close = pending_bluetooth_pairing_screen_close;
+  portEXIT_CRITICAL(&avatar_event_mux);
+
+  if (should_close) {
+    closeBluetoothPairingScreen();
+    avatar.setExpression(IMAGE_EXPRESSION_NORMAL);
+  }
+}
 
 // Bluetoothや通知のコールバックからsetExpression()を直接呼ぶと、
 // ImageAvatarLiteが描画タスクを停止した状態でSD/YAML処理を行ってしまいます。
@@ -126,6 +210,10 @@ void requestAvatarExpression(uint8_t expression) {
 }
 
 void processPendingAvatarExpression() {
+  if (isBluetoothPairingScreenActive()) {
+    return;
+  }
+
   int8_t expression = -1;
   portENTER_CRITICAL(&avatar_event_mux);
   expression = pending_avatar_expression;
@@ -213,6 +301,10 @@ UartNotifyConfig uart_notify_config;
 const unsigned long powericon_interval = 3000;  // バッテリーアイコンを更新する間隔(msec)
 unsigned long last_powericon_millis = 0;
 
+// ペアリングモードへの切り替えはボタンA長押しで行います(3回クリックは反応が悪いため)。
+const uint32_t BUTTON_A_PAIRING_HOLD_MS = 3000;
+bool button_a_pairing_hold_triggered = false;
+
 bool bluetooth_mode = false; 
 
 // --------------------
@@ -231,11 +323,14 @@ static constexpr uint8_t m5spk_virtual_channel = 0;
 static BluetoothA2DPSink_M5Speaker a2dp_sink = { &M5.Speaker, m5spk_virtual_channel };
 void hvt_event_callback(int avatar_expression, const char* text);
 void avrc_metadata_callback(uint8_t data1, const uint8_t *data2);
+void bluetooth_connection_state_callback(esp_a2d_connection_state_t state, void* context);
 
 static constexpr char BLUETOOTH_PREF_NAMESPACE[] = "stackchan-bt";
 static constexpr char BLUETOOTH_PEER_KEY[] = "peer";
+static constexpr uint32_t BLUETOOTH_RECONNECT_INTERVAL_MS = 10000;
 static esp_bd_addr_t locked_bluetooth_peer = { 0, 0, 0, 0, 0, 0 };
 static bool bluetooth_lock_loaded = false;
+static uint32_t last_bluetooth_reconnect_attempt = 0;
 
 bool hasBluetoothPeer(const esp_bd_addr_t peer) {
   const esp_bd_addr_t empty_peer = { 0, 0, 0, 0, 0, 0 };
@@ -273,6 +368,28 @@ void clearBluetoothPeerLock() {
   }
 }
 
+// 起動時にアプリ側またはESP32-A2DP側の保存先を確認します。
+// 旧バージョンで保存された接続先はアプリ側のロック先へ移行します。
+bool prepareSavedBluetoothPeer() {
+  loadBluetoothPeerLock();
+  if (hasBluetoothPeer(locked_bluetooth_peer)) {
+    return true;
+  }
+
+  if (!a2dp_sink.restoreLastConnection()) {
+    return false;
+  }
+
+  const esp_bd_addr_t* saved_peer = a2dp_sink.get_last_peer_address();
+  if (!hasBluetoothPeer(*saved_peer)) {
+    return false;
+  }
+
+  saveBluetoothPeerLock(*saved_peer);
+  Serial.println("Migrated saved Bluetooth peer for startup reconnect");
+  return true;
+}
+
 // 保存済みの接続先がある場合は、そのBluetoothアドレスだけを許可します。
 // 接続先が未登録（初回または明示的に解除した直後）の場合だけ新規接続を許可します。
 bool validateBluetoothAddress(esp_bd_addr_t remote_bda) {
@@ -299,6 +416,31 @@ bool validateBluetoothAddress(esp_bd_addr_t remote_bda) {
   return accepted;
 }
 
+// 通常モードでは外部PCからの接続受付を行わず、保存済みPCへだけ定期的に
+// ESP32側から接続します。
+void processBluetoothReconnect() {
+  if (!bluetooth_mode || a2dp_sink.isPairingMode()
+      || !a2dp_sink.isStackReady() || a2dp_sink.is_connected()
+      || a2dp_sink.get_connection_state() != ESP_A2D_CONNECTION_STATE_DISCONNECTED
+      || !hasBluetoothPeer(locked_bluetooth_peer)) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - last_bluetooth_reconnect_attempt < BLUETOOTH_RECONNECT_INTERVAL_MS) {
+    return;
+  }
+
+  last_bluetooth_reconnect_attempt = now;
+  Serial.printf("Connecting to saved Bluetooth peer: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                locked_bluetooth_peer[0], locked_bluetooth_peer[1],
+                locked_bluetooth_peer[2], locked_bluetooth_peer[3],
+                locked_bluetooth_peer[4], locked_bluetooth_peer[5]);
+  if (!a2dp_sink.connectToLockedPeer(locked_bluetooth_peer)) {
+    Serial.println("Bluetooth reconnect request failed");
+  }
+}
+
 void startBluetooth(bool pairing_mode = false) {
   loadBluetoothPeerLock();
   const bool has_a2dp_peer = a2dp_sink.restoreLastConnection();
@@ -315,29 +457,32 @@ void startBluetooth(bool pairing_mode = false) {
   a2dp_sink.set_avrc_metadata_callback(avrc_metadata_callback);
   a2dp_sink.setHvtEventCallback(hvt_event_callback);
   a2dp_sink.set_address_validator(validateBluetoothAddress);
+  a2dp_sink.set_on_connection_state_changed(bluetooth_connection_state_callback);
 
-#ifdef ESP_IDF_4
   if (pairing_mode) {
-    // 3クリックは利用者が明示的に選ぶ再ペアリング操作です。
+    // ボタンA長押しは利用者が明示的に選ぶ再ペアリング操作です。
     clearBluetoothPeerLock();
     a2dp_sink.forgetLastConnection();
-    a2dp_sink.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
-    Serial.println("Bluetooth pairing mode: discoverable");
+    Serial.println("Bluetooth pairing mode: discoverable and connectable");
   } else {
-    // 通常時は保存済みPCから接続できる一方、周囲のPCの検索には表示されません。
-    a2dp_sink.set_discoverability(ESP_BT_NON_DISCOVERABLE);
-    Serial.println("Bluetooth locked mode: non-discoverable");
+    Serial.println("Bluetooth locked mode: outgoing connection only");
   }
-#endif
+  a2dp_sink.setPairingMode(pairing_mode);
 
-  a2dp_sink.start(system_config.getBluetoothSetting()->device_name.c_str(), true);
-  avatar.setExpression(IMAGE_EXPRESSION_SAD);
-  avatar.setSpeechText(pairing_mode ? "Bluetooth Pairing" : "Bluetooth Mode");
+  // ライブラリ内の自動再接続は接続受付を一時的に有効化するため使いません。
+  // loop()から保存済みPCへだけ発信接続します。
+  a2dp_sink.start(system_config.getBluetoothSetting()->device_name.c_str(), false);
+  last_bluetooth_reconnect_attempt = millis() - BLUETOOTH_RECONNECT_INTERVAL_MS;
+  if (!isBluetoothPairingScreenActive()) {
+    avatar.setExpression(IMAGE_EXPRESSION_SAD);
+    avatar.setSpeechText(pairing_mode ? "Bluetooth Pairing" : "Bluetooth Mode");
+  }
   bluetooth_mode = true;
 }
 static fft_t fft;
 static constexpr size_t WAVE_SIZE = 320;
 static int16_t raw_data[WAVE_SIZE * 2];
+static constexpr long SERVO_IDLE_RANDOM_ANGLE = 15;
 
 void servoLoop(void *args) {
   DriveContext *ctx = (DriveContext *)args;
@@ -369,6 +514,17 @@ void servoLoop(void *args) {
     move_x = system_config.getServoInfo(AXIS_X)->start_degree + mouth_ratio * 15;
     // Y軸は90°から上にスイング（最大35°）
     move_y = system_config.getServoInfo(AXIS_Y)->start_degree - mouth_ratio * 10;
+    if (!sing_mode) {
+      // 待機中はX/Yとも初期位置を中心に±15°の範囲でランダムに動きます。
+      move_x += random(-SERVO_IDLE_RANDOM_ANGLE, SERVO_IDLE_RANDOM_ANGLE + 1);
+      move_y += random(-SERVO_IDLE_RANDOM_ANGLE, SERVO_IDLE_RANDOM_ANGLE + 1);
+    }
+    move_x = constrain(move_x,
+                       static_cast<long>(system_config.getServoInfo(AXIS_X)->lower_limit),
+                       static_cast<long>(system_config.getServoInfo(AXIS_X)->upper_limit));
+    move_y = constrain(move_y,
+                       static_cast<long>(system_config.getServoInfo(AXIS_Y)->lower_limit),
+                       static_cast<long>(system_config.getServoInfo(AXIS_Y)->upper_limit));
     servo.moveXY(move_x, move_y, move_time);
     if (!bluetooth_mode) {
       int lyric_no = random(system_config.getLyrics_num());
@@ -402,23 +558,31 @@ void lipSync(void *args)
     uint64_t level = 0;
     auto buf = a2dp_sink.getBuffer();
     if (buf) {
+      // Bluetooth側が更新するバッファを先にスナップショットし、FFTとLEDで共用します。
+      memcpy(raw_data, buf, WAVE_SIZE * 2 * sizeof(int16_t));
 #ifdef USE_LED
-      // buf[0]: LEFT
-      // buf[1]: RIGHT
+      uint32_t peak_left = 0;
+      uint32_t peak_right = 0;
+      for (size_t i = 0; i < WAVE_SIZE; ++i) {
+        peak_left = max(peak_left, static_cast<uint32_t>(abs(static_cast<int32_t>(raw_data[i * 2]))));
+        peak_right = max(peak_right, static_cast<uint32_t>(abs(static_cast<int32_t>(raw_data[i * 2 + 1]))));
+      }
+      // 約50%の振幅で全点灯する感度。level_led側で灯数を上限に丸めます。
+      const int led_level_left = peak_left * NUM_LEDS / INT16_MAX;
+      const int led_level_right = peak_right * NUM_LEDS / INT16_MAX;
       switch(system_config.getLedLR()) {
         case 1: // Left Only
-          level_led(abs(buf[0])*10/INT16_MAX,abs(buf[0])*10/INT16_MAX);
+          level_led(led_level_left, led_level_left);
           break;
         case 2: // Right Only
-          level_led(abs(buf[1])*10/INT16_MAX,abs(buf[1])*10/INT16_MAX);
+          level_led(led_level_right, led_level_right);
           break;
         default: // Stereo
-          level_led(abs(buf[1])*10/INT16_MAX,abs(buf[0])*10/INT16_MAX);
+          level_led(led_level_right, led_level_left);
           break;
       }
 #endif
 
-      memcpy(raw_data, buf, WAVE_SIZE * 2 * sizeof(int16_t));
       fft.exec(raw_data);
       for (size_t bx = 5; bx <= 60; ++bx) { // リップシンクで抽出する範囲はここで指定(低音)0〜64（高音）
         int32_t f = fft.get(bx);
@@ -444,6 +608,10 @@ void lipSync(void *args)
 }
 
 void hvt_event_callback(int avatar_expression, const char* text) {
+  if (isBluetoothPairingScreenActive()) {
+    return;
+  }
+
   // ESP32-A2DP側はM5Stack-Avatar互換の表情番号を通知するため、
   // 付属画像で表現できる normal / sad / angry に変換します。
   uint8_t image_expression = IMAGE_EXPRESSION_NORMAL;
@@ -458,7 +626,22 @@ void hvt_event_callback(int avatar_expression, const char* text) {
 void avrc_metadata_callback(uint8_t data1, const uint8_t *data2)
 {
   Serial.printf("AVRC metadata rsp: attribute id 0x%x, %s\n", data1, data2);
-  requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
+  if (!isBluetoothPairingScreenActive()) {
+    requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
+  }
+}
+
+void bluetooth_connection_state_callback(esp_a2d_connection_state_t state, void* context) {
+  if (state != ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    return;
+  }
+
+  // Bluetoothコールバック内ではLCDやAvatarを操作せず、loop()へ復帰要求だけを渡します。
+  portENTER_CRITICAL(&avatar_event_mux);
+  if (bluetooth_pairing_screen_active) {
+    pending_bluetooth_pairing_screen_close = true;
+  }
+  portEXIT_CRITICAL(&avatar_event_mux);
 }
 
 #if defined(USE_TCPNOTIFY) || defined(USE_UARTNOTIFY)
@@ -634,8 +817,13 @@ void setup(void)
     M5.Power.setExtOutput(true);  // M5Stackの横から給電を使用する。
   }
 
-  bluetooth_mode = system_config.getBluetoothSetting()->starting_state;
-  Serial.printf("Bluetooth_mode:%s\n", bluetooth_mode ? "true" : "false");
+  const bool saved_bluetooth_peer = prepareSavedBluetoothPeer();
+  bluetooth_mode = system_config.getBluetoothSetting()->starting_state
+                || saved_bluetooth_peer;
+  Serial.printf("Bluetooth_mode:%s (starting_state:%s saved_peer:%s)\n",
+                bluetooth_mode ? "true" : "false",
+                system_config.getBluetoothSetting()->starting_state ? "true" : "false",
+                saved_bluetooth_peer ? "true" : "false");
 
   if ((system_config.getServoInfo(AXIS_X)->pin == 21)
      || (system_config.getServoInfo(AXIS_X)->pin == 22)) {
@@ -645,10 +833,17 @@ void setup(void)
     }
   }
   
+  // Y軸の起動位置と待機動作の中心を、設定された可動範囲の中央にします。
+  servo_initial_param_s* servo_y = system_config.getServoInfo(AXIS_Y);
+  servo_y->start_degree = servo_y->lower_limit
+                        + (servo_y->upper_limit - servo_y->lower_limit) / 2;
+  Serial.printf("Servo Y center:%d (lower:%d upper:%d)\n",
+                servo_y->start_degree, servo_y->lower_limit, servo_y->upper_limit);
+
   servo.begin(system_config.getServoInfo(AXIS_X)->pin, system_config.getServoInfo(AXIS_X)->start_degree,
               system_config.getServoInfo(AXIS_X)->offset,
-              system_config.getServoInfo(AXIS_Y)->pin, system_config.getServoInfo(AXIS_Y)->start_degree,
-              system_config.getServoInfo(AXIS_Y)->offset,
+              servo_y->pin, servo_y->start_degree,
+              servo_y->offset,
               (ServoType)system_config.getServoType());
   delay(2000);
 
@@ -668,6 +863,23 @@ void setup(void)
   avatar.start();
   last_powericon_millis = millis();
 
+#ifdef USE_LED
+#ifdef USE_NECOMIMI_LED
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);  // 先頭LEDの起動時誤点灯を防止
+#endif
+  FastLED.addLeds<SK6812, LED_PIN, GRB>(leds, NUM_LEDS);  // GRB ordering is typical
+#ifdef USE_NECOMIMI_LED
+  FastLED.setBrightness(10);
+  level_led(LEDS_PER_EAR, LEDS_PER_EAR);
+#else
+  FastLED.setBrightness(32);
+  level_led(5, 5);
+#endif
+  delay(1000);
+  turn_off_led();
+#endif
+
   avatar.addTask(lipSync, "lipSync");
   avatar.addTask(servoLoop, "servoLoop", 1, 4096U);
   avatar.setExpression(IMAGE_EXPRESSION_NORMAL);
@@ -679,22 +891,15 @@ void setup(void)
     avatar.setSpeechText("Normal Mode");
   }
 
-#ifdef USE_LED
-  FastLED.addLeds<SK6812, LED_PIN, GRB>(leds, NUM_LEDS);  // GRB ordering is typical
-  FastLED.setBrightness(32);
-  level_led(5, 5);
-  delay(1000);
-  turn_off_led();
-#endif
-
-
 }
 
 void loop(void)
 {
 
   M5.update();
+  processBluetoothPairingScreen();
   processPendingAvatarExpression();
+  processBluetoothReconnect();
   if (M5.BtnA.wasDecideClickCount())
   {
     switch (M5.BtnA.getClickCount())
@@ -708,6 +913,7 @@ void loop(void)
 
     case 2:
       if (bluetooth_mode) {
+        closeBluetoothPairingScreen();
         avatar.setExpression(IMAGE_EXPRESSION_NORMAL);
         avatar.setSpeechText("Normal Mode");
         M5.Speaker.tone(800, 100);
@@ -718,14 +924,20 @@ void loop(void)
         bluetooth_mode = false;
       }
       break;
-
-    case 3:
+    }
+  }
+  // 3回クリックは反応が悪いため、ペアリングモードへの切り替えは3秒長押しで行います。
+  if (M5.BtnA.isPressed()) {
+    if (!button_a_pairing_hold_triggered && M5.BtnA.pressedFor(BUTTON_A_PAIRING_HOLD_MS)) {
+      button_a_pairing_hold_triggered = true;
       if (!bluetooth_mode) {
+        showBluetoothPairingScreen();
         startBluetooth(true);
         M5.Speaker.tone(1200, 100);
       }
-      break;
     }
+  } else {
+    button_a_pairing_hold_triggered = false;
   }
   if (M5.BtnB.wasPressed()) {
     uint8_t volume = M5.Speaker.getChannelVolume(m5spk_virtual_channel);

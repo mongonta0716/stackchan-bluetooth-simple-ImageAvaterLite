@@ -86,11 +86,11 @@ For details, please refer to the [YAML file](https://github.com/mongonta0716/sta
 - balloon<br>Configure speech bubble settings.
     - font_language("CN")<br>Specify font language. "JA" or "CN", uses Latin font if not specified.
     - lyrics<br>Set lines to display randomly in normal mode. Maximum of 10 lines.
-- led_lr(0)<br>LED lights according to volume in GoBottom1/2. *Requires source code modification and recompilation.
+- led_lr(0)<br>The Nekomimi LED connected to Port.B OUT (GPIO26) reacts to the left and right audio levels. Power it from Port.B 5V/GND; 18 SK6812 LEDs are controlled, nine per ear.
     - 0: Stereo
     - 1: Responds to left volume only
     - 2: Responds to right volume only
-- led_pin(15)<br>Specify GPIO pin number for LED (GoBottom1: 15, GoBottom2: 25)
+- led_pin(15)<br>This setting is for M5Go Bottom. It is unused while Nekomimi LED uses the fixed GPIO26 connection.
 - takao_base(false)<br>Setting for using [Stack-chan_Takao_Base](https://ssci.to/8905). (*Currently only supported on Core2)
 - servo_type("DYN_XL330")<br>Specify servo type
     - "PWM": SG90 series PWM servo
@@ -105,7 +105,9 @@ For details, please refer to the [YAML file](https://github.com/mongonta0716/sta
 # Usage
 
 - BtnA<br>Enter Bluetooth mode. (Only valid when bluetooth_mode = false)<br>
-- BtnA triple-click<br>Forget the saved peer and enter Bluetooth pairing mode. Use this for the first connection or when changing PCs. Normal Bluetooth mode only accepts the saved PC and is not discoverable by nearby PCs.<br>
+- BtnA hold for 3 seconds<br>Forget the saved peer and enter Bluetooth pairing mode. Use this for the first connection or when changing PCs. Normal Bluetooth mode only accepts the saved PC and is not discoverable by nearby PCs.<br>
+
+After a PC has connected once, it is remembered and Bluetooth starts automatically on the next boot to reconnect, regardless of the `starting_state` setting.
 
 - BtnB<br>Decrease volume.
 
