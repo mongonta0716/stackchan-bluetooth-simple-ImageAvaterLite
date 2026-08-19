@@ -7,22 +7,35 @@
 //#include <Ticker.h>
 #include <SD.h>
 #include <M5Unified.h>
-//#include <WiFi.h>
+#include <Preferences.h>
+#ifdef USE_TCPNOTIFY
+#include <WiFi.h>
+#endif
+#ifdef USE_UARTNOTIFY
+#include "Stackchan_AppConfig.h"
+#endif
 //#include <WiFiUdp.h>
 //#include <esp_wifi.h>
 #include "Stackchan_servo.h"
 #include "BluetoothA2DPSink_M5Speaker.hpp"
-#include "Avatar.h"
+#include "M5ImageAvatarLite.h"
+#include "ImageAvatarSystemConfig.h"
 //#include "Stackchan_Takao_Base.hpp"
 
-using namespace m5avatar;
-Avatar avatar;
+using namespace m5imageavatar;
+M5GFX &gfx(M5.Lcd);
 StackchanSERVO servo;
 
 #include "Stackchan_system_config.h"
 
 // M5GoBottomのLEDを使わない場合は下記の1行をコメントアウトしてください。
+// USE_TCPNOTIFY(WiFi+TCP通知)を有効にした場合、M5Stack Core2ではIRAM不足でビルドできないため
+// USE_LEDは自動的に無効化されます。(platformio.iniのbuild_flagsでUSE_TCPNOTIFYを指定してください。)
+// USE_UARTNOTIFY(UART通知)はWiFi/Bluetoothの共存コードを使わないためIRAMをほとんど消費せず、
+// USE_LEDと併用できます。
+#if !defined(USE_TCPNOTIFY)
 #define USE_LED
+#endif
 //#define USE_LED_OUT
 
 #ifdef USE_LED
@@ -84,8 +97,118 @@ StackchanSERVO servo;
 
 
 fs::FS json_fs = SD; // JSONファイルの収納場所(SPIFFS or SD)
+fs::FS avatar_yaml_fs = SD;
+fs::FS avatar_bmp_fs = SD;
 StackchanSystemConfig system_config;
-const char* stackchan_system_config_yaml = "/yaml/SC_Config.yaml";
+ImageAvatarSystemConfig avatar_system_config;
+const char* avatar_system_yaml = "/yaml/M5AvatarLiteSystem.yaml";
+uint8_t avatar_count = 0;
+ImageAvatarLite avatar(avatar_yaml_fs, avatar_bmp_fs);
+// ImageAvatarLiteは渡されたファイル名ポインタを表情変更時にも再利用するため、
+// setup()終了後もc_str()の参照先が有効なグローバルStringで保持します。
+String current_avatar_filename;
+String avatar_config_error;
+portMUX_TYPE avatar_event_mux = portMUX_INITIALIZER_UNLOCKED;
+int8_t pending_avatar_expression = -1;
+
+// 付属のslimeアバターでは normal / sad / angry の順に表情を定義しています。
+static constexpr uint8_t IMAGE_EXPRESSION_NORMAL = 0;
+static constexpr uint8_t IMAGE_EXPRESSION_SAD = 1;
+static constexpr uint8_t IMAGE_EXPRESSION_ANGRY = 2;
+
+// Bluetoothや通知のコールバックからsetExpression()を直接呼ぶと、
+// ImageAvatarLiteが描画タスクを停止した状態でSD/YAML処理を行ってしまいます。
+// 非同期タスクからは要求だけを保存し、loop()で安全に反映します。
+void requestAvatarExpression(uint8_t expression) {
+  portENTER_CRITICAL(&avatar_event_mux);
+  pending_avatar_expression = expression;
+  portEXIT_CRITICAL(&avatar_event_mux);
+}
+
+void processPendingAvatarExpression() {
+  int8_t expression = -1;
+  portENTER_CRITICAL(&avatar_event_mux);
+  expression = pending_avatar_expression;
+  pending_avatar_expression = -1;
+  portEXIT_CRITICAL(&avatar_event_mux);
+
+  if (expression >= 0) {
+    avatar.setExpression(static_cast<uint8_t>(expression));
+  }
+}
+
+void haltWithAvatarConfigError(const String& message) {
+  Serial.printf("Image avatar configuration error: %s\n", message.c_str());
+  M5.Lcd.fillScreen(TFT_BLACK);
+  M5.Lcd.setTextColor(TFT_RED, TFT_BLACK);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setCursor(8, 16);
+  M5.Lcd.println("Image avatar config error");
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Lcd.println(message);
+  for (;;) {
+    M5.update();
+    delay(100);
+  }
+}
+
+bool validateAvatarConfig(fs::FS& fs, const char* filename) {
+  File file = fs.open(filename);
+  if (!file) {
+    avatar_config_error = String("File not found: ") + filename;
+    return false;
+  }
+
+  // M5StackImageAvatarLib also uses a 4096-byte DynamicJsonDocument.
+  DynamicJsonDocument doc(4096);
+  DeserializationError error = deserializeYml(doc, file);
+  file.close();
+  if (error || doc.overflowed()) {
+    avatar_config_error = String("YAML parse failed: ") + filename;
+    if (error) {
+      avatar_config_error += String(" (") + error.c_str() + ")";
+    }
+    return false;
+  }
+
+  const char* skin = doc["color_info"]["skin"];
+  const char* eye_white = doc["color_info"]["eye_white"];
+  const char* transparent = doc["color_info"]["transparent"];
+  JsonArray expressions = doc["expression"];
+  if (!skin || !eye_white || !transparent || expressions.size() < 3
+      || doc["fixed_parts"][0]["filename"].isNull()
+      || doc["mouth"].size() < expressions.size()
+      || doc["eye"].size() < expressions.size()
+      || doc["init_param"].size() < expressions.size()) {
+    avatar_config_error = String("Required fields are missing: ") + filename;
+    return false;
+  }
+  return true;
+}
+
+#ifdef USE_TCPNOTIFY
+// --------------------
+// TCP通知(ピンポン)関連の設定
+const uint16_t TCP_NOTIFY_PORT = 8080;         // 通知を待ち受けるTCPポート
+const char* TCP_NOTIFY_MESSAGE = "notify";     // このメッセージを受信したときだけピンポン音を鳴らす
+const uint32_t WIFI_CONNECT_TIMEOUT = 15000;   // WiFi接続を待つ時間(msec)
+
+WiFiServer tcp_notify_server(TCP_NOTIFY_PORT);
+bool wifi_connected = false;
+// TCP通知関連の設定 end
+// --------------------
+#endif // USE_TCPNOTIFY
+
+#ifdef USE_UARTNOTIFY
+// --------------------
+// UART通知(ピンポン)関連の設定
+const char* UART_APPCONFIG_PATH = "/app/SCBluetooth/SC_AppConfig.xml"; // RxPin/TxPin/Baudrateの設定ファイル
+const char* UART_NOTIFY_MESSAGE = "notify"; // このメッセージを受信したときだけピンポン音を鳴らす
+
+UartNotifyConfig uart_notify_config;
+// UART通知関連の設定 end
+// --------------------
+#endif // USE_UARTNOTIFY
 
 const unsigned long powericon_interval = 3000;  // バッテリーアイコンを更新する間隔(msec)
 unsigned long last_powericon_millis = 0;
@@ -97,8 +220,6 @@ bool bluetooth_mode = false;
 #define LIPSYNC_LEVEL_MAX 10.0f
 static float lipsync_level_max = LIPSYNC_LEVEL_MAX; // リップシンクの上限初期値
 float mouth_ratio = 0.0f;
-bool sing_happy = true;
-ColorPalette *cps;
 // Avatar関連の設定 end
 // --------------------
 
@@ -108,21 +229,125 @@ uint32_t last_discharge_time = 0;  // USB給電が止まったときの時間(ms
 static constexpr uint8_t m5spk_virtual_channel = 0;
 
 static BluetoothA2DPSink_M5Speaker a2dp_sink = { &M5.Speaker, m5spk_virtual_channel };
+void hvt_event_callback(int avatar_expression, const char* text);
+void avrc_metadata_callback(uint8_t data1, const uint8_t *data2);
+
+static constexpr char BLUETOOTH_PREF_NAMESPACE[] = "stackchan-bt";
+static constexpr char BLUETOOTH_PEER_KEY[] = "peer";
+static esp_bd_addr_t locked_bluetooth_peer = { 0, 0, 0, 0, 0, 0 };
+static bool bluetooth_lock_loaded = false;
+
+bool hasBluetoothPeer(const esp_bd_addr_t peer) {
+  const esp_bd_addr_t empty_peer = { 0, 0, 0, 0, 0, 0 };
+  return memcmp(peer, empty_peer, ESP_BD_ADDR_LEN) != 0;
+}
+
+void loadBluetoothPeerLock() {
+  if (bluetooth_lock_loaded) { return; }
+
+  Preferences preferences;
+  if (preferences.begin(BLUETOOTH_PREF_NAMESPACE, true)) {
+    if (preferences.getBytesLength(BLUETOOTH_PEER_KEY) == ESP_BD_ADDR_LEN) {
+      preferences.getBytes(BLUETOOTH_PEER_KEY, locked_bluetooth_peer, ESP_BD_ADDR_LEN);
+    }
+    preferences.end();
+  }
+  bluetooth_lock_loaded = true;
+}
+
+void saveBluetoothPeerLock(const esp_bd_addr_t peer) {
+  memcpy(locked_bluetooth_peer, peer, ESP_BD_ADDR_LEN);
+  Preferences preferences;
+  if (preferences.begin(BLUETOOTH_PREF_NAMESPACE, false)) {
+    preferences.putBytes(BLUETOOTH_PEER_KEY, locked_bluetooth_peer, ESP_BD_ADDR_LEN);
+    preferences.end();
+  }
+}
+
+void clearBluetoothPeerLock() {
+  memset(locked_bluetooth_peer, 0, ESP_BD_ADDR_LEN);
+  Preferences preferences;
+  if (preferences.begin(BLUETOOTH_PREF_NAMESPACE, false)) {
+    preferences.remove(BLUETOOTH_PEER_KEY);
+    preferences.end();
+  }
+}
+
+// 保存済みの接続先がある場合は、そのBluetoothアドレスだけを許可します。
+// 接続先が未登録（初回または明示的に解除した直後）の場合だけ新規接続を許可します。
+bool validateBluetoothAddress(esp_bd_addr_t remote_bda) {
+  loadBluetoothPeerLock();
+  const esp_bd_addr_t* saved_peer = a2dp_sink.get_last_peer_address();
+
+  // 初回アップデート時はESP32-A2DPが保存していた接続先をロック先へ移行します。
+  if (!hasBluetoothPeer(locked_bluetooth_peer) && hasBluetoothPeer(*saved_peer)) {
+    saveBluetoothPeerLock(*saved_peer);
+  }
+
+  // ロック未登録なら、ペアリングモードで最初に接続した相手を固定先にします。
+  if (!hasBluetoothPeer(locked_bluetooth_peer)) {
+    saveBluetoothPeerLock(remote_bda);
+  }
+
+  const bool accepted = memcmp(locked_bluetooth_peer, remote_bda, ESP_BD_ADDR_LEN) == 0;
+
+  if (!accepted) {
+    Serial.printf("Rejected Bluetooth peer: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                  remote_bda[0], remote_bda[1], remote_bda[2],
+                  remote_bda[3], remote_bda[4], remote_bda[5]);
+  }
+  return accepted;
+}
+
+void startBluetooth(bool pairing_mode = false) {
+  loadBluetoothPeerLock();
+  const bool has_a2dp_peer = a2dp_sink.restoreLastConnection();
+
+  // 保存先が一度もない初回起動だけは、自動的にペアリング可能にします。
+  pairing_mode = pairing_mode
+              || (!hasBluetoothPeer(locked_bluetooth_peer) && !has_a2dp_peer);
+
+  // ライブラリが再接続失敗時に接続先を消しても、アプリ側のロック先から復元します。
+  if (!pairing_mode && hasBluetoothPeer(locked_bluetooth_peer)) {
+    a2dp_sink.rememberLastConnection(locked_bluetooth_peer);
+  }
+
+  a2dp_sink.set_avrc_metadata_callback(avrc_metadata_callback);
+  a2dp_sink.setHvtEventCallback(hvt_event_callback);
+  a2dp_sink.set_address_validator(validateBluetoothAddress);
+
+#ifdef ESP_IDF_4
+  if (pairing_mode) {
+    // 3クリックは利用者が明示的に選ぶ再ペアリング操作です。
+    clearBluetoothPeerLock();
+    a2dp_sink.forgetLastConnection();
+    a2dp_sink.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
+    Serial.println("Bluetooth pairing mode: discoverable");
+  } else {
+    // 通常時は保存済みPCから接続できる一方、周囲のPCの検索には表示されません。
+    a2dp_sink.set_discoverability(ESP_BT_NON_DISCOVERABLE);
+    Serial.println("Bluetooth locked mode: non-discoverable");
+  }
+#endif
+
+  a2dp_sink.start(system_config.getBluetoothSetting()->device_name.c_str(), true);
+  avatar.setExpression(IMAGE_EXPRESSION_SAD);
+  avatar.setSpeechText(pairing_mode ? "Bluetooth Pairing" : "Bluetooth Mode");
+  bluetooth_mode = true;
+}
 static fft_t fft;
 static constexpr size_t WAVE_SIZE = 320;
 static int16_t raw_data[WAVE_SIZE * 2];
 
 void servoLoop(void *args) {
   DriveContext *ctx = (DriveContext *)args;
-  Avatar *avatar = ctx->getAvatar();
+  ImageAvatarLite *avatar = ctx->getAvatar();
   long move_time = 0;
   long interval_time = 0;
   long move_x = 0;
   long move_y = 0;
-  float gaze_x = 0.0f;
-  float gaze_y = 0.0f;
   bool sing_mode = false;
-  while (avatar->isDrawing()) {
+  for (;;) {
     if (mouth_ratio == 0.0f) {
       // 待機時の動き
       interval_time = random(system_config.getServoInterval(AvatarMode::NORMAL)->interval_min
@@ -140,17 +365,10 @@ void servoLoop(void *args) {
                        , system_config.getServoInterval(AvatarMode::SINGING)->move_max);
       sing_mode = true;
     } 
-    avatar->getGaze(&gaze_y, &gaze_x);
-    
-//    Serial.printf("x:%f:y:%f\n", gaze_x, gaze_y);
-    // X軸は90°から+-で左右にスイング
-    if (gaze_x < 0) {
-      move_x = system_config.getServoInfo(AXIS_X)->start_degree - mouth_ratio * 15 + (int)(30.0 * gaze_x);
-    } else {
-      move_x = system_config.getServoInfo(AXIS_X)->start_degree + mouth_ratio * 15 + (int)(30.0 * gaze_x);
-    }
+    // ImageAvatarLiteには視線座標がないため、口の開きに合わせて左右へ動かします。
+    move_x = system_config.getServoInfo(AXIS_X)->start_degree + mouth_ratio * 15;
     // Y軸は90°から上にスイング（最大35°）
-    move_y = system_config.getServoInfo(AXIS_Y)->start_degree - mouth_ratio * 10 - abs(25.0 * gaze_y);
+    move_y = system_config.getServoInfo(AXIS_Y)->start_degree - mouth_ratio * 10;
     servo.moveXY(move_x, move_y, move_time);
     if (!bluetooth_mode) {
       int lyric_no = random(system_config.getLyrics_num());
@@ -158,9 +376,9 @@ void servoLoop(void *args) {
       avatar->setMouthOpenRatio(1.0f);
       avatar->setSpeechText((const char*)system_config.getLyric(lyric_no)->c_str());
       if (exp2 % 2) {
-        avatar->setExpression(Expression::Neutral);
+        requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
       } else {
-        avatar->setExpression(Expression::Happy);
+        requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
       }
       avatar->setMouthOpenRatio(0.5f);
     }
@@ -178,8 +396,8 @@ void servoLoop(void *args) {
 void lipSync(void *args)
 {
   DriveContext *ctx = (DriveContext *)args;
-  Avatar *avatar = ctx->getAvatar();
-  while (avatar->isDrawing())
+  ImageAvatarLite *avatar = ctx->getAvatar();
+  for (;;)
   {
     uint64_t level = 0;
     auto buf = a2dp_sink.getBuffer();
@@ -226,30 +444,115 @@ void lipSync(void *args)
 }
 
 void hvt_event_callback(int avatar_expression, const char* text) {
-  avatar.setExpression((Expression)avatar_expression);
-  avatar.setSpeechText(text);
+  // ESP32-A2DP側はM5Stack-Avatar互換の表情番号を通知するため、
+  // 付属画像で表現できる normal / sad / angry に変換します。
+  uint8_t image_expression = IMAGE_EXPRESSION_NORMAL;
+  if (avatar_expression == 1) {
+    image_expression = IMAGE_EXPRESSION_ANGRY;
+  } else if (avatar_expression == 2) {
+    image_expression = IMAGE_EXPRESSION_SAD;
+  }
+  requestAvatarExpression(image_expression);
 }
 
 void avrc_metadata_callback(uint8_t data1, const uint8_t *data2)
 {
   Serial.printf("AVRC metadata rsp: attribute id 0x%x, %s\n", data1, data2);
-  if (sing_happy) {
-    avatar.setExpression(Expression::Happy);
-  } else {
-    avatar.setExpression(Expression::Neutral);
+  requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
+}
+
+#if defined(USE_TCPNOTIFY) || defined(USE_UARTNOTIFY)
+// ドアチャイム風の「ピンポン」音を鳴らします。
+void playPinPon() {
+  M5.Speaker.tone(880, 250);  // Pin
+  delay(280);
+  M5.Speaker.tone(659, 400);  // Pon
+  delay(400);
+}
+
+// 通知を受信したときの処理(音とアバターの反応)
+void handleNotify() {
+  Serial.println("Notify received. Play PinPon.");
+  playPinPon();
+  requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
+  avatar.setSpeechText("ピンポーン");
+  delay(2000);
+  avatar.setSpeechText("");
+  requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
+}
+#endif // USE_TCPNOTIFY || USE_UARTNOTIFY
+
+#ifdef USE_TCPNOTIFY
+// SC_SecConfig.yamlに書かれたWiFi情報を使って接続します。
+bool connectWiFi() {
+  wifi_s* wifi_info = system_config.getWiFiSetting();
+  if (wifi_info->ssid.length() == 0) {
+    Serial.println("WiFi SSID is not set in SC_SecConfig.yaml. Skip WiFi connection.");
+    return false;
   }
-  sing_happy = !sing_happy;
-
+  Serial.printf("Connecting to WiFi SSID:%s\n", wifi_info->ssid.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifi_info->ssid.c_str(), wifi_info->password.c_str());
+  uint32_t start_millis = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if ((millis() - start_millis) > WIFI_CONNECT_TIMEOUT) {
+      Serial.println("WiFi connection timed out.");
+      return false;
+    }
+    delay(200);
+    Serial.print(".");
+  }
+  Serial.printf("\nWiFi connected. IP:%s\n", WiFi.localIP().toString().c_str());
+  return true;
 }
 
-void avatarStart() {
-  avatar.start();  
-  avatar.addTask(lipSync, "lipSync");
-  avatar.addTask(servoLoop, "servoLoop", 4096U, 1);
+// TCPサーバーとして通知を待ち受けるタスク
+void tcpNotifyTask(void *args) {
+  tcp_notify_server.begin();
+  Serial.printf("TCP notify server listening on port:%d\n", TCP_NOTIFY_PORT);
+  for (;;) {
+    WiFiClient client = tcp_notify_server.available();
+    if (client) {
+      while (client.connected()) {
+        if (client.available()) {
+          String line = client.readStringUntil('\n');
+          line.trim();
+          Serial.printf("TCP received:%s\n", line.c_str());
+          if (line == TCP_NOTIFY_MESSAGE) {
+            handleNotify();
+          }
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+      }
+      client.stop();
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+  vTaskDelete(NULL);
 }
-void avatarStop() {
-  avatar.stop();  
+#endif // USE_TCPNOTIFY
+
+#ifdef USE_UARTNOTIFY
+// Serial1で通知を待ち受けるタスク
+void uartNotifyTask(void *args) {
+  Serial.printf("UART notify listening on Serial1 (RxPin:%d TxPin:%d Baudrate:%u)\n",
+                uart_notify_config.rx_pin, uart_notify_config.tx_pin, uart_notify_config.baudrate);
+  for (;;) {
+    if (Serial1.available()) {
+      String line = Serial1.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 0) {
+        Serial.printf("UART received:%s\n", line.c_str());
+        if (line == UART_NOTIFY_MESSAGE) {
+          handleNotify();
+        }
+      }
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+  vTaskDelete(NULL);
 }
+#endif // USE_UARTNOTIFY
 
 
 
@@ -297,7 +600,30 @@ void setup(void)
   SD.begin(GPIO_NUM_4, SPI, 15000000);
   
   delay(1000);
-  system_config.loadConfig(json_fs, stackchan_system_config_yaml);
+  // SC_BasicConfig.yamlを基本設定として読み込み、旧SC_Config.yamlは使用しません。
+  // TCP通知を使う場合だけ個人設定SC_SecConfig.yamlも読み込みます。
+#ifdef USE_TCPNOTIFY
+  system_config.loadConfig(json_fs, "", 0,
+                           "/yaml/SC_SecConfig.yaml", 2048);
+#else
+  system_config.loadConfig(json_fs, "", 0, "", 0);
+#endif
+
+#ifdef USE_TCPNOTIFY
+  wifi_connected = connectWiFi();
+  if (wifi_connected) {
+    xTaskCreatePinnedToCore(tcpNotifyTask, "tcpNotifyTask", 4096, NULL, 1, NULL, APP_CPU_NUM);
+  }
+#endif // USE_TCPNOTIFY
+
+#ifdef USE_UARTNOTIFY
+  if (Stackchan_loadUartNotifyConfig(json_fs, UART_APPCONFIG_PATH, uart_notify_config)) {
+    Serial1.begin(uart_notify_config.baudrate, SERIAL_8N1, uart_notify_config.rx_pin, uart_notify_config.tx_pin);
+    xTaskCreatePinnedToCore(uartNotifyTask, "uartNotifyTask", 4096, NULL, 1, NULL, APP_CPU_NUM);
+  } else {
+    Serial.printf("Failed to load %s. UART notify disabled.\n", UART_APPCONFIG_PATH);
+  }
+#endif // USE_UARTNOTIFY
 
   M5.Speaker.setVolume(system_config.getBluetoothSetting()->start_volume);
   M5.Speaker.setChannelVolume(system_config.getBluetoothSetting()->start_volume, m5spk_virtual_channel);
@@ -314,13 +640,9 @@ void setup(void)
   if ((system_config.getServoInfo(AXIS_X)->pin == 21)
      || (system_config.getServoInfo(AXIS_X)->pin == 22)) {
     // Port.Aを利用する場合は、I2Cが使えないのでアイコンは表示しない。
-    avatar.setBatteryIcon(false);
     if (M5.getBoard() == m5::board_t::board_M5Stack) {
       M5.In_I2C.release();
     }
-  } else {
-    avatar.setBatteryIcon(true);
-    avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
   }
   
   servo.begin(system_config.getServoInfo(AXIS_X)->pin, system_config.getServoInfo(AXIS_X)->start_degree,
@@ -330,28 +652,29 @@ void setup(void)
               (ServoType)system_config.getServoType());
   delay(2000);
 
-  avatar.init(1); // start drawing
-  cps = new ColorPalette();
-
-  // Avatarの色を変えたい場合は下記の2行のカラーコードを書き換えてください。
-  cps->set(COLOR_PRIMARY, TFT_WHITE);         // 16進数で指定する場合は下記のように記述
-  //cps->set(COLOR_PRIMARY, (uint16_t)0x000000);         // 16進数で指定する場合は下記のように記述
-  cps->set(COLOR_BACKGROUND, TFT_BLACK);      // (uint16_t)0xaabbcc
-  //cps->set(COLOR_BACKGROUND, (uint16_t)0xdab300);
-  avatar.setColorPalette(*cps);
+  if (!avatar_yaml_fs.exists(avatar_system_yaml)) {
+    haltWithAvatarConfigError(String("File not found: ") + avatar_system_yaml);
+  }
+  avatar_system_config.loadConfig(avatar_yaml_fs, avatar_system_yaml);
+  M5.Lcd.setBrightness(avatar_system_config.getLcdBrightness());
+  current_avatar_filename = avatar_system_config.getAvatarYamlFilename(avatar_count);
+  if (current_avatar_filename.isEmpty()) {
+    haltWithAvatarConfigError("avatar_yaml is empty");
+  }
+  if (!validateAvatarConfig(avatar_yaml_fs, current_avatar_filename.c_str())) {
+    haltWithAvatarConfigError(avatar_config_error);
+  }
+  avatar.init(&gfx, current_avatar_filename.c_str(), false, IMAGE_EXPRESSION_NORMAL);
+  avatar.start();
   last_powericon_millis = millis();
 
   avatar.addTask(lipSync, "lipSync");
-  avatar.addTask(servoLoop, "servoLoop", 4096U, 1);
-  avatar.setExpression(Expression::Neutral);
+  avatar.addTask(servoLoop, "servoLoop", 1, 4096U);
+  avatar.setExpression(IMAGE_EXPRESSION_NORMAL);
   avatar.setSpeechFont(system_config.getFont());
 
   if (bluetooth_mode) {
-    a2dp_sink.set_avrc_metadata_callback(avrc_metadata_callback);
-    a2dp_sink.setHvtEventCallback(hvt_event_callback);
-    a2dp_sink.start(system_config.getBluetoothSetting()->device_name.c_str(), true);
-    avatar.setExpression(Expression::Sad);
-    avatar.setSpeechText("Bluetooth Mode");
+    startBluetooth();
   } else {
     avatar.setSpeechText("Normal Mode");
   }
@@ -371,32 +694,35 @@ void loop(void)
 {
 
   M5.update();
+  processPendingAvatarExpression();
   if (M5.BtnA.wasDecideClickCount())
   {
     switch (M5.BtnA.getClickCount())
     {
     case 1:
       if (!bluetooth_mode) {
-        a2dp_sink.set_avrc_metadata_callback(avrc_metadata_callback);
-        a2dp_sink.setHvtEventCallback(hvt_event_callback);
-        a2dp_sink.start(system_config.getBluetoothSetting()->device_name.c_str(), true);
-        avatar.setExpression(Expression::Sad);
-        avatar.setSpeechText("Bluetooth Mode");
+        startBluetooth();
         M5.Speaker.tone(1000, 100);
-        bluetooth_mode = true;
       }
       break;
 
     case 2:
       if (bluetooth_mode) {
-        avatar.setExpression(Expression::Neutral);
+        avatar.setExpression(IMAGE_EXPRESSION_NORMAL);
         avatar.setSpeechText("Normal Mode");
         M5.Speaker.tone(800, 100);
         a2dp_sink.stop();
-        a2dp_sink.end(true);
+        a2dp_sink.endPreservingLastConnection();
         delay(1000);
         avatar.setSpeechText("");
         bluetooth_mode = false;
+      }
+      break;
+
+    case 3:
+      if (!bluetooth_mode) {
+        startBluetooth(true);
+        M5.Speaker.tone(1200, 100);
       }
       break;
     }
@@ -479,7 +805,6 @@ void loop(void)
     if ((system_config.getServoInfo(AXIS_X)->pin != 21)
       && (system_config.getServoInfo(AXIS_X)->pin != 22)) {
       // Port.Aを利用する場合は、I2Cが使えないのでアイコンは表示しない。
-      avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
       last_powericon_millis = millis();
     }
   }

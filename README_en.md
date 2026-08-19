@@ -4,7 +4,7 @@
 
 # Overview
 
-This is a simple implementation that adds Bluetooth speaker functionality and Stack-chan's servo control features based on M5Stack-Avatar.
+This project adds Bluetooth speaker functionality and Stack-chan servo control to an image avatar rendered by M5StackImageAvatarLib.
 It is modified from the Bluetooth_with_ESP32A2DP example in [M5Unified](https://github.com/m5stack/M5Unified).
 
 # Development Environment
@@ -24,7 +24,7 @@ Arduino-ESP32 has been tested with version 2.0.4 (2.0.0 for Fire only). M5Stack 
 
 For detailed version information, please check [platformio.ini](https://github.com/mongonta0716/stackchan-bluetooth-simple/blob/main/platformio.ini).
 
-- [M5Stack-Avatar](https://github.com/meganetaaan/m5stack-avatar)
+- [M5StackImageAvatarLib](https://github.com/mongonta0716/M5StackImageAvatarLib)
 
 - [ESP8266Audio](https://github.com/earlephilhower/ESP8266Audio)
 
@@ -39,6 +39,8 @@ For detailed version information, please check [platformio.ini](https://github.c
 # Configuration
 If there is no YAML configuration file on the SD card, default values will be used. (Set to connect servo to PortA.)
 Place `/yaml/SC_BasicConfig.yaml` on the SD card to use your own settings.
+
+To display the image avatar, copy `data/bmp_slime`, `data/yaml/M5AvatarLiteSystem.yaml`, and `data/yaml/M5AvatarLite00slime.yaml` from this repository to the SD card while preserving the directory structure. The bundled images use PSRAM and are intended for Core2 or Fire.
 
 **On 2022/10/18, we changed from JSON to YAML. You can convert from JSON to YAML using [JSON to YAML Converter](https://www.site24x7.com/tools/json-to-yaml.html).**<br>Please note that comment handling has changed.
 **On 2025/03/24, we changed to use the stackchan-arduino library. Please create SC_BasicConfig.yaml based on the contents of SC_Config.yaml.**
@@ -103,6 +105,7 @@ For details, please refer to the [YAML file](https://github.com/mongonta0716/sta
 # Usage
 
 - BtnA<br>Enter Bluetooth mode. (Only valid when bluetooth_mode = false)<br>
+- BtnA triple-click<br>Forget the saved peer and enter Bluetooth pairing mode. Use this for the first connection or when changing PCs. Normal Bluetooth mode only accepts the saved PC and is not discoverable by nearby PCs.<br>
 
 - BtnB<br>Decrease volume.
 
@@ -119,4 +122,3 @@ For details, please refer to the [YAML file](https://github.com/mongonta0716/sta
 
 # Author
 [Takao Akaki](https://github.com/mongonta0716)
-

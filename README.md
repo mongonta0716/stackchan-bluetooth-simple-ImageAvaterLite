@@ -4,7 +4,7 @@
 
 # 概要
 
-M5Stack-AvatarをベースにシンプルにBluetoothスピーカー機能とスタックチャンのサーボコントロール機能をつけました。
+M5StackImageAvatarLibを使った画像アバターに、Bluetoothスピーカー機能とスタックチャンのサーボコントロール機能をつけました。
 [M5Unified](https://github.com/m5stack/M5Unified)のexampleであるBluetooth_with_ESP32A2DPをベースに改造しています。
 
 
@@ -25,7 +25,7 @@ Arduino-ESP32は2.0.4(Fireのみ2.0.0)で動作確認しています。M5Stack F
 
 詳しいバージョンについては[platformio.ini](https://github.com/mongonta0716/stackchan-bluetooth-simple/blob/main/platformio.ini)を見てください。
 
-- [M5Stack-Avatar](https://github.com/meganetaaan/m5stack-avatar)
+- [M5StackImageAvatarLib](https://github.com/mongonta0716/M5StackImageAvatarLib)
 
 - [ESP8266Audio](https://github.com/earlephilhower/ESP8266Audio)
 
@@ -40,6 +40,8 @@ Arduino-ESP32は2.0.4(Fireのみ2.0.0)で動作確認しています。M5Stack F
 # 設定
 SDカードに設定用のYAMLファイルがないとデフォルト値を利用します。（PortAへサーボを接続する設定になっています。）
 SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利用できます。
+
+画像アバターの表示には、リポジトリの`data/bmp_slime`フォルダと、`data/yaml/M5AvatarLiteSystem.yaml`、`data/yaml/M5AvatarLite00slime.yaml`を同じ階層構成でSDカードへコピーしてください。付属画像はPSRAMを使用するため、Core2またはFireで利用してください。
 
 **2022/10/18にJSONからYAMLへ変更しました。JSONからYAMLへのコンバートは[JSON から YAML コンバータ](https://www.site24x7.com/ja/tools/json-to-yaml.html)にて可能です。**<br>コメントの扱いが変わっているので注意してください。
 **2025/03/24にstackchan-arduinoライブラリを使用するように変更しました。SC_Config.yamlの内容を元にSC_BasicConfig.yamlを作成してください。**
@@ -103,6 +105,7 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 # 使い方
 
 - BtnA<br>Bluetoothモードに入ります。(bluetooth_mode = falseの時のみ有効)<br>
+- BtnA 3クリック<br>保存済みの接続先を解除し、Bluetoothペアリングモードに入ります。初回接続時や接続先PCを変更するときに使用します。通常のBluetoothモードでは保存済みPCのみ接続でき、周囲のPCからは検出されません。<br>
 
 - BtnB<br>音量を下げます。
 
@@ -119,6 +122,4 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 
 # Author
 [Takao Akaki](https://github.com/mongonta0716)
-
-
 

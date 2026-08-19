@@ -30,6 +30,39 @@ public:
 
   void setHvtEventCallback(hvtEventCallback cb) { _hvt_evt_cb = cb; }
 
+  // ESP32-A2DP v1.7.3 clears the saved peer in end(), so preserve it when
+  // temporarily leaving Bluetooth mode.  release_memory must stay false to
+  // allow start() to be called again.
+  void endPreservingLastConnection()
+  {
+    esp_bd_addr_t saved_peer;
+    memcpy(saved_peer, *get_last_peer_address(), ESP_BD_ADDR_LEN);
+
+    if (is_connected()) {
+      disconnect();
+      while (is_connected()) { delay(10); }
+    }
+
+    BluetoothA2DPSink::end(false);
+    set_last_connection(saved_peer);
+  }
+
+  // Explicitly forget the locked peer before entering pairing mode.
+  void forgetLastConnection() { clean_last_connection(); }
+
+  // Load the library's legacy last-peer entry before start().  This lets the
+  // application migrate existing installations to its independent peer lock.
+  bool restoreLastConnection()
+  {
+    get_last_connection();
+    return has_last_connection();
+  }
+
+  void rememberLastConnection(esp_bd_addr_t peer)
+  {
+    set_last_connection(peer);
+  }
+
   void clear(void)
   {
     for (int i = 0; i < 3; ++i)
@@ -129,6 +162,16 @@ protected:
     }
 
     BluetoothA2DPSink::av_hdl_a2d_evt(event, p_param);
+
+#ifdef ESP_IDF_4
+    // Pairing mode is only needed until the first connection succeeds.
+    // Keeping the sink non-discoverable afterwards prevents Windows Swift
+    // Pair notifications while retaining connectability for the saved peer.
+    if (event == ESP_A2D_CONNECTION_STATE_EVT
+        && a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+      set_discoverability(ESP_BT_NON_DISCOVERABLE);
+    }
+#endif
   }
 
   void av_hdl_avrc_evt(uint16_t event, void *p_param) override

@@ -32,4 +32,12 @@
 *.app
 
 .pio
+.pio_build_firmware/
 .vscode
+
+# WiFi等の個人情報を含む設定ファイル
+data/yaml/SC_SecConfig.yaml
+data_2/
+lib/*
+!lib/M5StackImageAvatar/
+!lib/M5StackImageAvatar/**
