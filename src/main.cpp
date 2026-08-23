@@ -17,6 +17,7 @@
 //#include <WiFiUdp.h>
 //#include <esp_wifi.h>
 #include "Stackchan_servo.h"
+#include "esp_gap_bt_api.h"
 #include "BluetoothA2DPSink_M5Speaker.hpp"
 #include "M5ImageAvatarLite.h"
 #include "ImageAvatarSystemConfig.h"
@@ -331,6 +332,7 @@ static constexpr uint32_t BLUETOOTH_RECONNECT_INTERVAL_MS = 10000;
 static esp_bd_addr_t locked_bluetooth_peer = { 0, 0, 0, 0, 0, 0 };
 static bool bluetooth_lock_loaded = false;
 static uint32_t last_bluetooth_reconnect_attempt = 0;
+static bool bluetooth_bonds_pruned = false;
 
 bool hasBluetoothPeer(const esp_bd_addr_t peer) {
   const esp_bd_addr_t empty_peer = { 0, 0, 0, 0, 0, 0 };
@@ -366,6 +368,28 @@ void clearBluetoothPeerLock() {
     preferences.remove(BLUETOOTH_PEER_KEY);
     preferences.end();
   }
+}
+
+// ロック先以外のペアリング情報（リンクキー）をESP32から削除します。
+// これを残しておくと、過去にペアリングした別のPCが再ペアリングモード時などに
+// 先に接続を試みてしまい、そちら側に接続ダイアログが出てしまいます。
+void pruneOtherBluetoothBonds(const esp_bd_addr_t keep_peer) {
+  int dev_num = esp_bt_gap_get_bond_device_num();
+  if (dev_num <= 0) { return; }
+
+  esp_bd_addr_t* bond_list = (esp_bd_addr_t*)malloc(sizeof(esp_bd_addr_t) * dev_num);
+  if (bond_list == nullptr) { return; }
+
+  if (esp_bt_gap_get_bond_device_list(&dev_num, bond_list) == ESP_OK) {
+    for (int i = 0; i < dev_num; ++i) {
+      if (memcmp(bond_list[i], keep_peer, ESP_BD_ADDR_LEN) == 0) { continue; }
+      Serial.printf("Removing stale Bluetooth bond: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                    bond_list[i][0], bond_list[i][1], bond_list[i][2],
+                    bond_list[i][3], bond_list[i][4], bond_list[i][5]);
+      esp_bt_gap_remove_bond_device(bond_list[i]);
+    }
+  }
+  free(bond_list);
 }
 
 // 起動時にアプリ側またはESP32-A2DP側の保存先を確認します。
@@ -404,6 +428,9 @@ bool validateBluetoothAddress(esp_bd_addr_t remote_bda) {
   // ロック未登録なら、ペアリングモードで最初に接続した相手を固定先にします。
   if (!hasBluetoothPeer(locked_bluetooth_peer)) {
     saveBluetoothPeerLock(remote_bda);
+    // 新しい固定先が決まったので、それ以外の古いペアリング情報は削除し、
+    // 別のPCが接続を試みてダイアログを出さないようにします。
+    pruneOtherBluetoothBonds(locked_bluetooth_peer);
   }
 
   const bool accepted = memcmp(locked_bluetooth_peer, remote_bda, ESP_BD_ADDR_LEN) == 0;
@@ -420,9 +447,19 @@ bool validateBluetoothAddress(esp_bd_addr_t remote_bda) {
 // ESP32側から接続します。
 void processBluetoothReconnect() {
   if (!bluetooth_mode || a2dp_sink.isPairingMode()
-      || !a2dp_sink.isStackReady() || a2dp_sink.is_connected()
-      || a2dp_sink.get_connection_state() != ESP_A2D_CONNECTION_STATE_DISCONNECTED
-      || !hasBluetoothPeer(locked_bluetooth_peer)) {
+      || !a2dp_sink.isStackReady() || !hasBluetoothPeer(locked_bluetooth_peer)) {
+    return;
+  }
+
+  // 起動して最初にロック先が確定したタイミングで一度だけ、旧バージョンから
+  // 残っている可能性のある他PCのペアリング情報を掃除します。
+  if (!bluetooth_bonds_pruned) {
+    pruneOtherBluetoothBonds(locked_bluetooth_peer);
+    bluetooth_bonds_pruned = true;
+  }
+
+  if (a2dp_sink.is_connected()
+      || a2dp_sink.get_connection_state() != ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
     return;
   }
 

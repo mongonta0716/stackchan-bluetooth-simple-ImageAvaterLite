@@ -41,3 +41,4 @@ data_2/
 lib/*
 !lib/M5StackImageAvatar/
 !lib/M5StackImageAvatar/**
+convert/

@@ -132,6 +132,62 @@ protected:
     }
   }
 
+  // ライブラリ標準のhandle_connection_state()は切断時に自前で再接続を試み、
+  // その際に一時的にset_scan_mode_connectable(true)を呼ぶため、ロック中の
+  // 相手以外にも数百ms間だけ検出・接続可能な状態になってしまいます
+  // （processBluetoothReconnect()による定期再接続と役割が重複する上、
+  // 通常モードでも外部から見えてしまう原因になります）。
+  // ここでは状態の記録とコールバック呼び出しだけを行い、ライブラリ自身の
+  // 自動再接続・スキャンモード変更は行いません。
+  void handle_connection_state(uint16_t event, void *p_param) override
+  {
+    esp_a2d_cb_param_t* a2d = (esp_a2d_cb_param_t *)(p_param);
+
+    memcpy(peer_bd_addr, a2d->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
+    connection_state = a2d->conn_stat.state;
+    if (connection_state_callback != nullptr) {
+      connection_state_callback(connection_state, connection_state_obj);
+    }
+
+    switch (a2d->conn_stat.state) {
+      case ESP_A2D_CONNECTION_STATE_DISCONNECTED:
+        pin_code_int = 0;
+        pin_code_request = Undefined;
+        if (bt_dis_connected != nullptr) { (*bt_dis_connected)(); }
+        if (is_i2s_output) { bt_i2s_task_shut_down(); }
+        break;
+
+      case ESP_A2D_CONNECTION_STATE_CONNECTING:
+        connection_rety_count++;
+        break;
+
+      case ESP_A2D_CONNECTION_STATE_CONNECTED: {
+        bool is_valid = true;
+        if (address_validator != nullptr) {
+          uint8_t *bda = a2d->conn_stat.remote_bda;
+          if (!address_validator(bda)) {
+            esp_a2d_sink_disconnect(bda);
+            is_valid = false;
+          }
+        }
+        if (is_valid) {
+          if (bt_connected != nullptr) { (*bt_connected)(); }
+          set_scan_mode_connectable(false);
+          connection_rety_count = 0;
+          if (is_i2s_output) { bt_i2s_task_start_up(); }
+#ifdef ESP_IDF_4
+          esp_bt_gap_read_remote_name(a2d->conn_stat.remote_bda);
+#endif
+          if (rssi_active) { esp_bt_gap_read_rssi_delta(a2d->conn_stat.remote_bda); }
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
   void clearMetaData(void)
   {
     for (int i = 0; i < metatext_num; ++i)
