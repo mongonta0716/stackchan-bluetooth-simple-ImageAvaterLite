@@ -105,9 +105,11 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 # 使い方
 
 - BtnA<br>Bluetoothモードに入ります。(bluetooth_mode = falseの時のみ有効)<br>
-- BtnA 3秒長押し<br>保存済みの接続先を解除し、Bluetoothペアリングモードに入ります。初回接続時や接続先PCを変更するときに使用します。通常のBluetoothモードでは保存済みPCのみ接続でき、周囲のPCからは検出されません。<br>
+- BtnA 3秒長押し<br>保存済みの接続先と旧ボンド情報を解除し、Bluetoothペアリングモードに入ります。BluetoothモードのON/OFFに関係なく実行できます。初回接続時や接続先PCを変更するときに使用します。通常のBluetoothモードでは保存済みPCのみ接続でき、周囲のPCからは検出されません。<br>
 
 一度接続したPCは本体に保存され、次回起動時は`starting_state`の設定にかかわらずBluetoothを起動して自動再接続します。
+
+接続先保護方式を更新したファームウェアの初回起動時は、旧版で保存された接続先を一度だけ破棄します。画面に`Bluetooth Pairing`または`Waiting Connection`と表示されたら、接続したいPCのWindows設定から旧`M5StackBTSPK`を一度削除して、再度追加してください。初回登録が完了するまでは、接続しないPCのBluetoothをOFFにしてください。保存済みPCとの認証に失敗した場合は、Windowsのペアリングダイアログを繰り返さないよう自動再接続を停止し、`Pairing Required`と表示します。その場合はBtnAを3秒長押しして同じ手順で再ペアリングしてください。
 
 - BtnB<br>音量を下げます。
 

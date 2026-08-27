@@ -105,9 +105,11 @@ For details, please refer to the [YAML file](https://github.com/mongonta0716/sta
 # Usage
 
 - BtnA<br>Enter Bluetooth mode. (Only valid when bluetooth_mode = false)<br>
-- BtnA hold for 3 seconds<br>Forget the saved peer and enter Bluetooth pairing mode. Use this for the first connection or when changing PCs. Normal Bluetooth mode only accepts the saved PC and is not discoverable by nearby PCs.<br>
+- BtnA hold for 3 seconds<br>Forget the saved peer and old bond information, then enter Bluetooth pairing mode. This works whether Bluetooth mode is on or off. Use it for the first connection or when changing PCs. Normal Bluetooth mode only accepts the saved PC and is not discoverable by nearby PCs.<br>
 
 After a PC has connected once, it is remembered and Bluetooth starts automatically on the next boot to reconnect, regardless of the `starting_state` setting.
+
+On the first boot of firmware using the updated peer-protection format, a peer saved by an older version is discarded once. If the screen shows `Bluetooth Pairing` or `Waiting Connection`, remove the old `M5StackBTSPK` entry in Windows settings on the intended PC, then add it again. Keep Bluetooth off on PCs that should not connect until this initial enrollment is complete. If authentication with the saved PC fails, automatic reconnection stops to avoid repeatedly opening the Windows pairing dialog and the screen shows `Pairing Required`. Hold BtnA for three seconds and repeat the same pairing procedure.
 
 - BtnB<br>Decrease volume.
 

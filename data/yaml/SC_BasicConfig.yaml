@@ -58,7 +58,7 @@ servo_type: "M5_SCS" # "PWM": SG90PWMServo, "SCS": Feetech SCS0009 "DYN_XL330": 
 ### 以下はアプリケーションによって設定が変わります。
 bluetooth:
   device_name: "M5StackBTSPK"
-  starting_state: false
+  starting_state: 0 # 0: 保存済みPCへ再接続を試みる 1: PCからの接続を待ち受ける 2: BluetoothをOFFにする
   start_volume: 100
 auto_power_off_time: 0 # Core2 Only. time(msec) of auto power off(0 is disable.)
 balloon:
