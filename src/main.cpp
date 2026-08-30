@@ -565,6 +565,9 @@ static fft_t fft;
 static constexpr size_t WAVE_SIZE = 320;
 static int16_t raw_data[WAVE_SIZE * 2];
 static constexpr long SERVO_IDLE_RANDOM_ANGLE = 15;
+// 歌うモードでX軸をスイングさせる段階数と、正面からの最大振れ幅(±°)。
+static constexpr long SERVO_SINGING_SWING_STEPS = 5;
+static constexpr long SERVO_SINGING_SWING_MAX_ANGLE = 15;
 
 void servoLoop(void *args) {
   DriveContext *ctx = (DriveContext *)args;
@@ -592,14 +595,24 @@ void servoLoop(void *args) {
                        , system_config.getServoInterval(AvatarMode::SINGING)->move_max);
       sing_mode = true;
     } 
-    // ImageAvatarLiteには視線座標がないため、口の開きに合わせて左右へ動かします。
-    move_x = system_config.getServoInfo(AXIS_X)->start_degree + mouth_ratio * 15;
+    // ImageAvatarLiteには視線座標がないため、口の開きに合わせて動かします。
+    const long start_x = system_config.getServoInfo(AXIS_X)->start_degree;
     // Y軸は90°から上にスイング（最大35°）
     move_y = system_config.getServoInfo(AXIS_Y)->start_degree - mouth_ratio * 10;
     if (!sing_mode) {
       // 待機中はX/Yとも初期位置を中心に±15°の範囲でランダムに動きます。
-      move_x += random(-SERVO_IDLE_RANDOM_ANGLE, SERVO_IDLE_RANDOM_ANGLE + 1);
+      move_x = start_x + random(-SERVO_IDLE_RANDOM_ANGLE, SERVO_IDLE_RANDOM_ANGLE + 1);
       move_y += random(-SERVO_IDLE_RANDOM_ANGLE, SERVO_IDLE_RANDOM_ANGLE + 1);
+    } else {
+      // X軸は音量(mouth_ratio)を5段階に量子化した振幅で、正面のstart_degreeから
+      // 最大±15°の範囲を、毎回ランダムな向きにスイングさせます。
+      const long swing_level =
+          constrain(static_cast<long>(ceilf(mouth_ratio / 1.2f * SERVO_SINGING_SWING_STEPS)),
+                    1L, SERVO_SINGING_SWING_STEPS);
+      const long swing_amplitude =
+          swing_level * SERVO_SINGING_SWING_MAX_ANGLE / SERVO_SINGING_SWING_STEPS;
+      const long swing_dir = (random(2) == 0) ? -1 : 1;
+      move_x = start_x + swing_dir * swing_amplitude;
     }
     move_x = constrain(move_x,
                        static_cast<long>(system_config.getServoInfo(AXIS_X)->lower_limit),
