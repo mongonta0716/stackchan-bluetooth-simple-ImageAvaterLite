@@ -1,44 +1,4 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
 .pio
-.pio_build_firmware/
-.vscode
-
-# WiFi等の個人情報を含む設定ファイル
-data/yaml/SC_SecConfig.yaml
-data_2/
-lib/*
-!lib/M5StackImageAvatar/
-!lib/M5StackImageAvatar/**
+.vscode/
 convert/
+data_2/

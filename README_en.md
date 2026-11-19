@@ -43,7 +43,7 @@ Place `/yaml/SC_BasicConfig.yaml` on the SD card to use your own settings.
 To display the image avatar, copy `data/bmp_slime`, `data/yaml/M5AvatarLiteSystem.yaml`, and `data/yaml/M5AvatarLite00slime.yaml` from this repository to the SD card while preserving the directory structure. The bundled images use PSRAM and are intended for Core2 or Fire.
 
 **On 2022/10/18, we changed from JSON to YAML. You can convert from JSON to YAML using [JSON to YAML Converter](https://www.site24x7.com/tools/json-to-yaml.html).**<br>Please note that comment handling has changed.
-**On 2025/03/24, we changed to use the stackchan-arduino library. Please create SC_BasicConfig.yaml based on the contents of SC_Config.yaml.**
+**On 2025/03/24, we changed to use the stackchan-arduino library. Edit the bundled `data/yaml/SC_BasicConfig.yaml` to configure your settings, then place it at `/yaml/SC_BasicConfig.yaml` on the SD card.**
 
 For details, please refer to the [YAML file](https://github.com/mongonta0716/stackchan-bluetooth-simple/blob/main/data/yaml/SC_BasicConfig.yaml).
 
@@ -78,7 +78,7 @@ For details, please refer to the [YAML file](https://github.com/mongonta0716/sta
              - move_max(1000)
 - bluetooth
     - device_name(M5Stack)<br>Specify the Bluetooth speaker device name.
-    - starting_state(false)<br>Specify whether to start in Bluetooth mode.
+    - starting_state(false)<br>`true`: start in Bluetooth mode; `false`: do not start Bluetooth.
     - start_volume(100)<br>Set initial value for Bluetooth speaker
 
 - auto_power_off_time(0)<br>Core2 only. Powers off after the specified time has elapsed after USB power supply is turned OFF. (0 means no power off)
@@ -105,11 +105,6 @@ For details, please refer to the [YAML file](https://github.com/mongonta0716/sta
 # Usage
 
 - BtnA<br>Enter Bluetooth mode. (Only valid when bluetooth_mode = false)<br>
-- BtnA hold for 3 seconds<br>Forget the saved peer and old bond information, then enter Bluetooth pairing mode. This works whether Bluetooth mode is on or off. Use it for the first connection or when changing PCs. Normal Bluetooth mode only accepts the saved PC and is not discoverable by nearby PCs.<br>
-
-After a PC has connected once, it is remembered and Bluetooth starts automatically on the next boot to reconnect, regardless of the `starting_state` setting.
-
-On the first boot of firmware using the updated peer-protection format, a peer saved by an older version is discarded once. If the screen shows `Bluetooth Pairing` or `Waiting Connection`, remove the old `M5StackBTSPK` entry in Windows settings on the intended PC, then add it again. Keep Bluetooth off on PCs that should not connect until this initial enrollment is complete. If authentication with the saved PC fails, automatic reconnection stops to avoid repeatedly opening the Windows pairing dialog and the screen shows `Pairing Required`. Hold BtnA for three seconds and repeat the same pairing procedure.
 
 - BtnB<br>Decrease volume.
 

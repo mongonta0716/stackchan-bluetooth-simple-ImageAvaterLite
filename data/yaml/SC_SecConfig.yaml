@@ -1,0 +1,11 @@
+# 個人情報用の設定ファイル(WiFi接続情報など)です。
+# このファイルはSDカードの /yaml/SC_SecConfig.yaml に配置してください。
+# 実際のSSID/パスワードを書いたこのファイルはGitにコミットしないでください。(.gitignoreで除外済み)
+wifi:
+  ssid: "your-wifi-ssid"
+  password: "your-wifi-password"
+
+apikey:
+  stt: ""
+  aiservice: ""
+  tts: ""

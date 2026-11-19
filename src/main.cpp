@@ -16,7 +16,6 @@
 //#include <WiFiUdp.h>
 //#include <esp_wifi.h>
 #include "Stackchan_servo.h"
-#include "BluetoothPeerStore.hpp"
 #include "BluetoothA2DPSink_M5Speaker.hpp"
 #include "M5ImageAvatarLite.h"
 #include "ImageAvatarSystemConfig.h"
@@ -141,64 +140,11 @@ String current_avatar_filename;
 String avatar_config_error;
 portMUX_TYPE avatar_event_mux = portMUX_INITIALIZER_UNLOCKED;
 int8_t pending_avatar_expression = -1;
-bool bluetooth_pairing_screen_active = false;
-bool pending_bluetooth_pairing_screen_close = false;
 
 // 付属のslimeアバターでは normal / sad / angry の順に表情を定義しています。
 static constexpr uint8_t IMAGE_EXPRESSION_NORMAL = 0;
 static constexpr uint8_t IMAGE_EXPRESSION_SAD = 1;
 static constexpr uint8_t IMAGE_EXPRESSION_ANGRY = 2;
-
-bool isBluetoothPairingScreenActive() {
-  bool active;
-  portENTER_CRITICAL(&avatar_event_mux);
-  active = bluetooth_pairing_screen_active;
-  portEXIT_CRITICAL(&avatar_event_mux);
-  return active;
-}
-
-// ImageAvatarLiteの描画タスクを止め、ペアリング中だけ案内画面を表示します。
-void showBluetoothPairingScreen() {
-  portENTER_CRITICAL(&avatar_event_mux);
-  bluetooth_pairing_screen_active = true;
-  pending_bluetooth_pairing_screen_close = false;
-  pending_avatar_expression = -1;
-  portEXIT_CRITICAL(&avatar_event_mux);
-
-  avatar.suspend();
-  gfx.startWrite();
-  gfx.fillScreen(TFT_BLACK);
-  gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-  gfx.setTextSize(2);
-  gfx.setTextDatum(textdatum_t::middle_center);
-  gfx.drawString("Bluetooth pairing mode", gfx.width() / 2, gfx.height() / 2);
-  gfx.endWrite();
-}
-
-void closeBluetoothPairingScreen() {
-  bool was_active;
-  portENTER_CRITICAL(&avatar_event_mux);
-  was_active = bluetooth_pairing_screen_active;
-  bluetooth_pairing_screen_active = false;
-  pending_bluetooth_pairing_screen_close = false;
-  portEXIT_CRITICAL(&avatar_event_mux);
-
-  if (was_active) {
-    avatar.resume();
-  }
-}
-
-void processBluetoothPairingScreen() {
-  bool should_close;
-  portENTER_CRITICAL(&avatar_event_mux);
-  should_close = pending_bluetooth_pairing_screen_close;
-  portEXIT_CRITICAL(&avatar_event_mux);
-
-  if (should_close) {
-    closeBluetoothPairingScreen();
-    avatar.setExpression(IMAGE_EXPRESSION_NORMAL);
-  }
-}
 
 // Bluetoothや通知のコールバックからsetExpression()を直接呼ぶと、
 // ImageAvatarLiteが描画タスクを停止した状態でSD/YAML処理を行ってしまいます。
@@ -210,10 +156,6 @@ void requestAvatarExpression(uint8_t expression) {
 }
 
 void processPendingAvatarExpression() {
-  if (isBluetoothPairingScreenActive()) {
-    return;
-  }
-
   int8_t expression = -1;
   portENTER_CRITICAL(&avatar_event_mux);
   expression = pending_avatar_expression;
@@ -301,20 +243,7 @@ UartNotifyConfig uart_notify_config;
 const unsigned long powericon_interval = 3000;  // バッテリーアイコンを更新する間隔(msec)
 unsigned long last_powericon_millis = 0;
 
-// ペアリングモードへの切り替えはボタンA長押しで行います(3回クリックは反応が悪いため)。
-const uint32_t BUTTON_A_PAIRING_HOLD_MS = 3000;
-bool button_a_pairing_hold_triggered = false;
-
 bool bluetooth_mode = false;
-
-// SC_BasicConfig.yamlのbluetooth.starting_stateに対応する起動時の挙動。
-// Reconnect:保存済みPCへ発信接続を試みる  WaitForConnection:PCからの接続を待ち受ける(発信しない)
-// Pairing:ボタンA長押しによる明示的な再ペアリング(保存済み接続先を破棄)
-enum class BluetoothStartMode : uint8_t {
-  Reconnect,
-  WaitForConnection,
-  Pairing
-};
 
 // --------------------
 // Avatar関連の初期設定
@@ -332,233 +261,13 @@ static constexpr uint8_t m5spk_virtual_channel = 0;
 static BluetoothA2DPSink_M5Speaker a2dp_sink = { &M5.Speaker, m5spk_virtual_channel };
 void hvt_event_callback(int avatar_expression, const char* text);
 void avrc_metadata_callback(uint8_t data1, const uint8_t *data2);
-void bluetooth_connection_state_callback(esp_a2d_connection_state_t state, void* context);
-
-static constexpr uint32_t BLUETOOTH_RECONNECT_INTERVAL_MS = 10000;
-static stackchan_bluetooth::PeerStore bluetooth_peer_store;
-
-struct BluetoothRuntimeState {
-  bool enrollment_open = false;
-  bool bonds_pruned = false;
-  bool authentication_failure_reported = false;
-  uint32_t last_reconnect_attempt = 0;
-};
-
-static BluetoothRuntimeState bluetooth_runtime;
-
-struct BluetoothStartOptions {
-  bool accept_incoming_connections;
-  bool allow_enrollment;
-  const char* status_text;
-};
-
-BluetoothStartOptions makeBluetoothStartOptions(BluetoothStartMode mode,
-                                                 bool has_saved_peer) {
-  const bool explicit_pairing = mode == BluetoothStartMode::Pairing;
-  const bool allow_enrollment = !has_saved_peer;
-  const bool accept_incoming_connections =
-      allow_enrollment || mode == BluetoothStartMode::WaitForConnection;
-  const char* status_text = explicit_pairing ? "Bluetooth Pairing"
-                          : accept_incoming_connections ? "Waiting Connection"
-                          : "Bluetooth Mode";
-  return { accept_incoming_connections, allow_enrollment, status_text };
-}
-
-void loadBluetoothPeerLock() {
-  if (bluetooth_peer_store.isLoaded()) { return; }
-
-  const auto result = bluetooth_peer_store.load();
-  if (result == stackchan_bluetooth::PeerStore::LoadResult::LegacyPeerCleared) {
-    ESP_LOGW("StackchanBT",
-             "Cleared legacy Bluetooth peer lock; re-pairing is required");
-  } else if (result == stackchan_bluetooth::PeerStore::LoadResult::StorageError) {
-    ESP_LOGE("StackchanBT", "Unable to load Bluetooth peer lock");
-  }
-
-  if (bluetooth_peer_store.hasPeer()) {
-    a2dp_sink.setLockedPeer(bluetooth_peer_store.peer());
-    char address[stackchan_bluetooth::kAddressTextSize];
-    ESP_LOGI("StackchanBT", "Loaded locked Bluetooth peer: %s",
-             stackchan_bluetooth::formatAddress(bluetooth_peer_store.peer(), address));
-  }
-}
-
-// 保存先は空のときだけ確定できます。既存ロックを別アドレスで上書きしません。
-bool lockBluetoothPeerIfEmpty(const esp_bd_addr_t peer) {
-  loadBluetoothPeerLock();
-  const auto result = bluetooth_peer_store.lockIfEmpty(peer);
-  if (result == stackchan_bluetooth::PeerStore::LockResult::AlreadyLocked) {
-    return true;
-  }
-  if (result == stackchan_bluetooth::PeerStore::LockResult::Conflict) {
-    char address[stackchan_bluetooth::kAddressTextSize];
-    ESP_LOGE("StackchanBT", "Blocked Bluetooth peer overwrite attempt: %s",
-             stackchan_bluetooth::formatAddress(peer, address));
-    return false;
-  }
-  if (result == stackchan_bluetooth::PeerStore::LockResult::StorageError) {
-    ESP_LOGE("StackchanBT", "Failed to persist Bluetooth peer lock");
-    return false;
-  }
-
-  a2dp_sink.setLockedPeer(bluetooth_peer_store.peer());
-  char address[stackchan_bluetooth::kAddressTextSize];
-  ESP_LOGI("StackchanBT", "Locked Bluetooth peer: %s",
-           stackchan_bluetooth::formatAddress(peer, address));
-  return true;
-}
-
-void clearBluetoothPeerLock() {
-  if (!bluetooth_peer_store.clear()) {
-    ESP_LOGE("StackchanBT", "Failed to clear Bluetooth peer lock");
-  }
-  a2dp_sink.clearLockedPeer();
-}
-
-// アプリ側のロックだけを接続先の正とします。ESP32-A2DPのlegacy last_bdaは
-// 誤ったPCを保持している可能性があるため、自動移行しません。
-bool prepareSavedBluetoothPeer() {
-  loadBluetoothPeerLock();
-  if (bluetooth_peer_store.hasPeer()) {
-    return true;
-  }
-
-  a2dp_sink.forgetLastConnection();
-  ESP_LOGI("StackchanBT", "No locked Bluetooth peer; fresh pairing is required");
-  return false;
-}
-
-// 保存済みの接続先がある場合は、そのBluetoothアドレスだけを許可します。
-// 接続先が未登録（初回または明示的に解除した直後）の場合だけ新規接続を許可します。
-bool validateBluetoothAddress(esp_bd_addr_t remote_bda) {
-  loadBluetoothPeerLock();
-
-  // ロック未登録なら、ペアリングモードで最初に接続した相手を固定先にします。
-  if (!bluetooth_peer_store.hasPeer()) {
-    if (!bluetooth_runtime.enrollment_open) {
-      char address[stackchan_bluetooth::kAddressTextSize];
-      ESP_LOGE("StackchanBT", "Rejected peer registration outside pairing mode: %s",
-               stackchan_bluetooth::formatAddress(remote_bda, address));
-      return false;
-    }
-    if (!lockBluetoothPeerIfEmpty(remote_bda)) {
-      return false;
-    }
-    bluetooth_runtime.enrollment_open = false;
-    // 新しい固定先が決まったので、それ以外の古いペアリング情報は削除し、
-    // 別のPCが接続を試みてダイアログを出さないようにします。
-    a2dp_sink.removeBondsExcept(bluetooth_peer_store.peer());
-  }
-
-  const bool accepted = bluetooth_peer_store.matches(remote_bda);
-
-  if (!accepted) {
-    char address[stackchan_bluetooth::kAddressTextSize];
-    ESP_LOGW("StackchanBT", "Rejected Bluetooth peer: %s",
-             stackchan_bluetooth::formatAddress(remote_bda, address));
-  }
-  return accepted;
-}
-
-// 通常モードでは外部PCからの接続受付を行わず、保存済みPCへだけ定期的に
-// ESP32側から接続します。
-void processBluetoothReconnect() {
-  a2dp_sink.processIncomingConnectionPreparation();
-  if (!bluetooth_mode || a2dp_sink.isAcceptingIncomingConnections()
-      || !a2dp_sink.isStackReady() || !bluetooth_peer_store.hasPeer()) {
-    return;
-  }
-
-  // リンクキー不一致などの認証失敗は再試行してもWindowsのペアリング要求を
-  // 繰り返すだけなので、Bluetoothモードを入り直すまで発信を停止します。
-  if (a2dp_sink.lockedPeerAuthenticationFailed()) {
-    if (!bluetooth_runtime.authentication_failure_reported) {
-      bluetooth_runtime.authentication_failure_reported = true;
-      ESP_LOGE("StackchanBT", "Reconnect stopped after authentication failure; re-pairing is required");
-      avatar.setExpression(IMAGE_EXPRESSION_SAD);
-      avatar.setSpeechText("Pairing Required");
-    }
-    return;
-  }
-
-  // 起動して最初にロック先が確定したタイミングで一度だけ、旧バージョンから
-  // 残っている可能性のある他PCのペアリング情報を掃除します。
-  if (!bluetooth_runtime.bonds_pruned) {
-    a2dp_sink.removeBondsExcept(bluetooth_peer_store.peer());
-    bluetooth_runtime.bonds_pruned = true;
-  }
-
-  if (a2dp_sink.is_connected()
-      || a2dp_sink.get_connection_state() != ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-    return;
-  }
-
-  const uint32_t now = millis();
-  if (now - bluetooth_runtime.last_reconnect_attempt
-      < BLUETOOTH_RECONNECT_INTERVAL_MS) {
-    return;
-  }
-
-  bluetooth_runtime.last_reconnect_attempt = now;
-  char address[stackchan_bluetooth::kAddressTextSize];
-  Serial.printf("Connecting to saved Bluetooth peer: %s\n",
-                stackchan_bluetooth::formatAddress(bluetooth_peer_store.peer(), address));
-  if (!a2dp_sink.connectToLockedPeer(bluetooth_peer_store.peer())) {
-    Serial.println("Bluetooth reconnect request failed");
-  }
-}
-
-void startBluetooth(BluetoothStartMode mode = BluetoothStartMode::Reconnect) {
-  loadBluetoothPeerLock();
-
-  if (mode == BluetoothStartMode::Pairing) {
-    // ボタンA長押しは利用者が明示的に選ぶ再ペアリング操作です。
-    clearBluetoothPeerLock();
-    a2dp_sink.forgetLastConnection();
-  }
-
-  const BluetoothStartOptions options =
-      makeBluetoothStartOptions(mode, bluetooth_peer_store.hasPeer());
-  bluetooth_runtime.enrollment_open = options.allow_enrollment;
-  bluetooth_runtime.authentication_failure_reported = false;
-  a2dp_sink.clearAuthenticationFailure();
-
-  // 新規登録では旧ボンドの削除が完了するまで接続受付を開きません。
-  if (options.allow_enrollment) {
-    a2dp_sink.requestFreshPairing();
-  }
-
-  // ライブラリが再接続失敗時に接続先を消しても、アプリ側のロック先から復元します。
-  if (bluetooth_peer_store.hasPeer()) {
-    a2dp_sink.rememberLastConnection(bluetooth_peer_store.peer());
-  }
-
+void startBluetooth() {
   a2dp_sink.set_avrc_metadata_callback(avrc_metadata_callback);
   a2dp_sink.setHvtEventCallback(hvt_event_callback);
-  a2dp_sink.set_address_validator(validateBluetoothAddress);
-  a2dp_sink.set_on_connection_state_changed(bluetooth_connection_state_callback);
-
-  if (options.allow_enrollment) {
-    Serial.println("Bluetooth pairing mode: discoverable and connectable");
-  } else if (options.accept_incoming_connections) {
-    Serial.println("Bluetooth waiting mode: non-discoverable, waiting for saved peer");
-  } else {
-    Serial.println("Bluetooth locked mode: outgoing connection only");
-  }
-  // 保存先ありの待受モードはconnectableですが非検出にし、新規PCの
-  // ペアリング画面へ不用意に現れないようにします。
-  a2dp_sink.configureIncomingConnections(options.accept_incoming_connections,
-                                         options.allow_enrollment);
-
-  // ライブラリ内の自動再接続は接続受付を一時的に有効化するため使いません。
-  // loop()から保存済みPCへだけ発信接続します(接続待受でない場合)。
-  a2dp_sink.start(system_config.getBluetoothSetting()->device_name.c_str(), false);
-  bluetooth_runtime.last_reconnect_attempt =
-      millis() - BLUETOOTH_RECONNECT_INTERVAL_MS;
-  if (!isBluetoothPairingScreenActive()) {
-    avatar.setExpression(IMAGE_EXPRESSION_SAD);
-    avatar.setSpeechText(options.status_text);
-  }
+  a2dp_sink.start(system_config.getBluetoothSetting()->device_name.c_str(),
+                  true);
+  avatar.setExpression(IMAGE_EXPRESSION_SAD);
+  avatar.setSpeechText("Bluetooth Mode");
   bluetooth_mode = true;
 }
 static fft_t fft;
@@ -703,10 +412,6 @@ void lipSync(void *args)
 }
 
 void hvt_event_callback(int avatar_expression, const char* text) {
-  if (isBluetoothPairingScreenActive()) {
-    return;
-  }
-
   // ESP32-A2DP側はM5Stack-Avatar互換の表情番号を通知するため、
   // 付属画像で表現できる normal / sad / angry に変換します。
   uint8_t image_expression = IMAGE_EXPRESSION_NORMAL;
@@ -721,22 +426,7 @@ void hvt_event_callback(int avatar_expression, const char* text) {
 void avrc_metadata_callback(uint8_t data1, const uint8_t *data2)
 {
   Serial.printf("AVRC metadata rsp: attribute id 0x%x, %s\n", data1, data2);
-  if (!isBluetoothPairingScreenActive()) {
-    requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
-  }
-}
-
-void bluetooth_connection_state_callback(esp_a2d_connection_state_t state, void* context) {
-  if (state != ESP_A2D_CONNECTION_STATE_CONNECTED) {
-    return;
-  }
-
-  // Bluetoothコールバック内ではLCDやAvatarを操作せず、loop()へ復帰要求だけを渡します。
-  portENTER_CRITICAL(&avatar_event_mux);
-  if (bluetooth_pairing_screen_active) {
-    pending_bluetooth_pairing_screen_close = true;
-  }
-  portEXIT_CRITICAL(&avatar_event_mux);
+  requestAvatarExpression(IMAGE_EXPRESSION_NORMAL);
 }
 
 #if defined(USE_TCPNOTIFY) || defined(USE_UARTNOTIFY)
@@ -912,14 +602,9 @@ void setup(void)
     M5.Power.setExtOutput(true);  // M5Stackの横から給電を使用する。
   }
 
-  const bool saved_bluetooth_peer = prepareSavedBluetoothPeer();
-  // starting_state 0:再接続を試みる 1:接続を待ち受ける 2:BluetoothをOFFにする
-  const uint8_t bt_starting_state = system_config.getBluetoothSetting()->starting_state;
-  bluetooth_mode = (bt_starting_state != 2);
-  Serial.printf("Bluetooth_mode:%s (starting_state:%u saved_peer:%s)\n",
-                bluetooth_mode ? "true" : "false",
-                bt_starting_state,
-                saved_bluetooth_peer ? "true" : "false");
+  // starting_state true:Bluetoothモードで起動 false:Bluetoothを起動しない
+  bluetooth_mode = system_config.getBluetoothSetting()->starting_state;
+  Serial.printf("Bluetooth_mode:%s\n", bluetooth_mode ? "true" : "false");
 
   if ((system_config.getServoInfo(AXIS_X)->pin == 21)
      || (system_config.getServoInfo(AXIS_X)->pin == 22)) {
@@ -982,8 +667,7 @@ void setup(void)
   avatar.setSpeechFont(system_config.getFont());
 
   if (bluetooth_mode) {
-    startBluetooth(bt_starting_state == 1 ? BluetoothStartMode::WaitForConnection
-                                           : BluetoothStartMode::Reconnect);
+    startBluetooth();
   } else {
     avatar.setSpeechText("Normal Mode");
   }
@@ -994,9 +678,7 @@ void loop(void)
 {
 
   M5.update();
-  processBluetoothPairingScreen();
   processPendingAvatarExpression();
-  processBluetoothReconnect();
   if (M5.BtnA.wasDecideClickCount())
   {
     switch (M5.BtnA.getClickCount())
@@ -1010,36 +692,17 @@ void loop(void)
 
     case 2:
       if (bluetooth_mode) {
-        closeBluetoothPairingScreen();
         avatar.setExpression(IMAGE_EXPRESSION_NORMAL);
         avatar.setSpeechText("Normal Mode");
         M5.Speaker.tone(800, 100);
         a2dp_sink.stop();
-        a2dp_sink.endPreservingLastConnection();
+        a2dp_sink.end(false);
         delay(1000);
         avatar.setSpeechText("");
         bluetooth_mode = false;
       }
       break;
     }
-  }
-  // 3回クリックは反応が悪いため、ペアリングモードへの切り替えは3秒長押しで行います。
-  if (M5.BtnA.isPressed()) {
-    if (!button_a_pairing_hold_triggered && M5.BtnA.pressedFor(BUTTON_A_PAIRING_HOLD_MS)) {
-      button_a_pairing_hold_triggered = true;
-      if (bluetooth_mode) {
-        closeBluetoothPairingScreen();
-        a2dp_sink.stop();
-        a2dp_sink.endPreservingLastConnection();
-        bluetooth_mode = false;
-        delay(250);
-      }
-      showBluetoothPairingScreen();
-      startBluetooth(BluetoothStartMode::Pairing);
-      M5.Speaker.tone(1200, 100);
-    }
-  } else {
-    button_a_pairing_hold_triggered = false;
   }
   if (M5.BtnB.wasPressed()) {
     uint8_t volume = M5.Speaker.getChannelVolume(m5spk_virtual_channel);

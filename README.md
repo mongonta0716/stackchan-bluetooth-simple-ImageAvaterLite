@@ -44,7 +44,7 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 画像アバターの表示には、リポジトリの`data/bmp_slime`フォルダと、`data/yaml/M5AvatarLiteSystem.yaml`、`data/yaml/M5AvatarLite00slime.yaml`を同じ階層構成でSDカードへコピーしてください。付属画像はPSRAMを使用するため、Core2またはFireで利用してください。
 
 **2022/10/18にJSONからYAMLへ変更しました。JSONからYAMLへのコンバートは[JSON から YAML コンバータ](https://www.site24x7.com/ja/tools/json-to-yaml.html)にて可能です。**<br>コメントの扱いが変わっているので注意してください。
-**2025/03/24にstackchan-arduinoライブラリを使用するように変更しました。SC_Config.yamlの内容を元にSC_BasicConfig.yamlを作成してください。**
+**2025/03/24にstackchan-arduinoライブラリを使用するように変更しました。同梱の`data/yaml/SC_BasicConfig.yaml`を元に設定を編集し、SDカードの`/yaml/SC_BasicConfig.yaml`へ配置してください。**
 
 詳しくは[YAMLファイル](https://github.com/mongonta0716/stackchan-bluetooth-simple/blob/main/data/yaml/SC_BasicConfig.yaml)を参照してください。
 
@@ -79,7 +79,7 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
              - move_max(1000)
 - bluetooth
     - device_name(M5Stack)<br>Bluetoothスピーカーのデバイス名を指定します。
-    - starting_state(false)<br>起動時にBluetoothモードにするかどうかを指定します。
+    - starting_state(false)<br>`true`: Bluetoothモードで起動、`false`: Bluetoothを起動しません。
     - start_volume(100)<br>Bluetoothスピーカーの初期値を設定
 
 - auto_power_off_time(0)<br>Core2のみ。USBの電源供給がOFFになったあと設定した時間が経過すると電源OFFになります。（0は電源OFFしない）
@@ -105,11 +105,6 @@ SDカードに`/yaml/SC_BasicConfig.yaml`を配置すると自分の設定が利
 # 使い方
 
 - BtnA<br>Bluetoothモードに入ります。(bluetooth_mode = falseの時のみ有効)<br>
-- BtnA 3秒長押し<br>保存済みの接続先と旧ボンド情報を解除し、Bluetoothペアリングモードに入ります。BluetoothモードのON/OFFに関係なく実行できます。初回接続時や接続先PCを変更するときに使用します。通常のBluetoothモードでは保存済みPCのみ接続でき、周囲のPCからは検出されません。<br>
-
-一度接続したPCは本体に保存され、次回起動時は`starting_state`の設定にかかわらずBluetoothを起動して自動再接続します。
-
-接続先保護方式を更新したファームウェアの初回起動時は、旧版で保存された接続先を一度だけ破棄します。画面に`Bluetooth Pairing`または`Waiting Connection`と表示されたら、接続したいPCのWindows設定から旧`M5StackBTSPK`を一度削除して、再度追加してください。初回登録が完了するまでは、接続しないPCのBluetoothをOFFにしてください。保存済みPCとの認証に失敗した場合は、Windowsのペアリングダイアログを繰り返さないよう自動再接続を停止し、`Pairing Required`と表示します。その場合はBtnAを3秒長押しして同じ手順で再ペアリングしてください。
 
 - BtnB<br>音量を下げます。
 
